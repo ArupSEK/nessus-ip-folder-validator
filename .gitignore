@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Streamlit / local secrets
+.streamlit/secrets.toml
+
+# Reports and exports
+*.xlsx
+*.csv
+!sample_ips.csv
+nessus_ip_validation_*.csv
+nessus_ip_validation_*.xlsx
+exports/
+output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
