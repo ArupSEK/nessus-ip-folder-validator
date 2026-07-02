@@ -38,10 +38,16 @@ GET    /scans/{scan_id}/export/{file_id}/status
 GET    /scans/{scan_id}/export/{file_id}/download
 ```
 
-## Install on Kali / Linux
+## Clone repo
 
 ```bash
-cd nessus_ip_validator_tool
+git clone https://github.com/ArupSEK/nessus-ip-folder-validator.git
+cd nessus-ip-folder-validator
+```
+
+## Run on Kali / Linux
+
+```bash
 chmod +x run_linux.sh
 ./run_linux.sh
 ```
@@ -49,14 +55,13 @@ chmod +x run_linux.sh
 Manual method:
 
 ```bash
-cd nessus_ip_validator_tool
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Install on Windows
+## Run on Windows
 
 Double-click:
 
@@ -67,7 +72,6 @@ run_windows.bat
 Manual method:
 
 ```powershell
-cd nessus_ip_validator_tool
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
