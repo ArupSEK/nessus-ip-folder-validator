@@ -1,51 +1,84 @@
 # Nessus IP-to-Folder Validator
 
-A modern Streamlit GUI tool to validate a CSV/Excel list of IP addresses against Nessus / Tenable scan folders and scan histories.
+A Streamlit GUI that checks a CSV/Excel IP list against Nessus or Tenable scans, folders, latest scan history, configured targets, host results, and authentication evidence.
 
-## What it shows
+## Fixed IP-detection logic
 
-For each input IP address, the tool reports:
+The validator no longer marks an IP as **Not Found** only because the scan-details API returned an empty host list or returned the host as a DNS name.
 
-- Whether the IP is present in Nessus scan results
-- Primary folder name where the latest match is found
-- All folder names if the IP is present in multiple folders
-- Latest scan name, scan date, and scan status
-- Authentication status
-- Authentication failure reason, where plugin output is available
-- Auth evidence plugin ID/name
-- Protocol summary
-- Match count
-- Evidence source: Fast API or CSV Export
+For each input IP, it now checks in this order:
 
-## Best mode to use
+1. The latest scan-result host list.
+2. Host details when the summary host is a DNS name/FQDN.
+3. Configured scan target fields such as `text_targets`, `targets`, and `alt_targets`.
+4. Nessus CSV export host/IP columns.
+5. The scan name as a clearly labelled last-resort fallback.
 
-Use **Fast API mode** first for quick lookup.
+The output shows a **Presence Type**:
 
-Use **Reliable CSV export mode** for final VAPT validation because it exports the scan result CSV and parses the `Host`, `Plugin ID`, `Name`, and `Plugin Output` columns. This gives the best authentication failure reason.
+| Presence Type | Meaning |
+|---|---|
+| Scan result | The IP was found in the actual scan-result host data. |
+| Configured target | The IP is configured in the scan, but Nessus did not return a directly mappable host result. |
+| Scan name only | The IP appears only in the scan name; verify the configured target. |
+| Not found | No matching result, target, CSV host field, or scan-name evidence was found. |
 
-## API endpoints used
+When a configured IP has no history, the result states **scan not performed** instead of incorrectly showing the IP as absent from Nessus.
 
-The tool uses the common Tenable/Nessus API flow:
+## Latest-history behaviour
+
+By default, the tool checks only the latest scan run. Enable **Include older scan histories** only when you need historical matches.
+
+Authentication is classified using evidence from the selected latest scan/history only. An old authentication failure no longer overrides a newer successful run.
+
+## What the report contains
+
+- Present in Nessus
+- Presence type and result note
+- Primary and all matching folders
+- Latest scan name, date, and status
+- Whether scan history exists
+- Authentication status and failure reason
+- Authentication evidence plugin
+- Protocol summary and confidence
+- Match count and evidence source
+
+## Collection modes
+
+### Fast API mode
+
+Recommended for normal lookup. If a host is returned only as a DNS name, the tool automatically requests host details to recover the IP.
+
+### Fast API + host details
+
+Reads host details for every matched host. Use it when you need additional host-level evidence.
+
+### Reliable CSV export mode
+
+Slower, but best for final VAPT validation and exact authentication failure reasons because it parses plugin output from exported results. It is also useful for archived results.
+
+## API flow
 
 ```text
 GET    /folders
 GET    /scans
 GET    /scans/{scan_id}/history
 GET    /scans/{scan_id}?history_id=<history_id>
-GET    /scans/{scan_uuid}/hosts/{host_id}?history_id=<history_id>   # optional
-POST   /scans/{scan_id}/export?history_id=<history_id>              # CSV mode
+GET    /scans/{scan_id}/history/{history_uuid}                 # UUID fallback
+GET    /scans/{scan_uuid}/hosts/{host_id}?history_id=<id>
+POST   /scans/{scan_id}/export?history_id=<history_id>
 GET    /scans/{scan_id}/export/{file_id}/status
 GET    /scans/{scan_id}/export/{file_id}/download
 ```
 
-## Clone repo
+## Install and run
 
 ```bash
 git clone https://github.com/ArupSEK/nessus-ip-folder-validator.git
 cd nessus-ip-folder-validator
 ```
 
-## Run on Kali / Linux
+### Kali/Linux
 
 ```bash
 chmod +x run_linux.sh
@@ -61,15 +94,9 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Run on Windows
+### Windows
 
-Double-click:
-
-```text
-run_windows.bat
-```
-
-Manual method:
+Double-click `run_windows.bat`, or run:
 
 ```powershell
 python -m venv .venv
@@ -78,11 +105,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Input file format
-
-CSV or Excel is supported.
-
-Minimum column:
+## Input format
 
 ```csv
 IP Address
@@ -91,59 +114,37 @@ IP Address
 10.10.10.25
 ```
 
-The column can be named `IP`, `IP Address`, `Host`, `Hostname`, or similar. The GUI lets you select the column.
+The validator also accepts IP values such as `192.168.1.10/32`, mixed text like `server01 / 192.168.1.10`, IPv4 with a port, and IPv6.
 
 ## Connection settings
 
-For Tenable Vulnerability Management cloud:
+Tenable Vulnerability Management:
 
 ```text
-Base URL: https://cloud.tenable.com
+https://cloud.tenable.com
 ```
 
-For standalone Nessus / Nessus Manager:
+Standalone Nessus/Nessus Manager:
 
 ```text
-Base URL: https://<nessus-ip>:8834
+https://<nessus-ip>:8834
 ```
 
-Use your Nessus/Tenable Access Key and Secret Key.
+Use an API account that can view the required folders and scans. For a self-signed standalone certificate, clear **Verify SSL certificate**.
 
-If your Nessus uses a self-signed certificate, uncheck **Verify SSL certificate**.
+## Run regression tests
 
-## Authentication status logic
+```bash
+python -m unittest discover -s tests -v
+```
 
-The tool classifies authentication status using evidence plugins, especially:
-
-| Status | Evidence examples |
-|---|---|
-| Authenticated | 141118, 110095, or plugin 19506 showing Credentialed Checks: yes |
-| Valid with limitations | 110385, 117885 |
-| Failed | 104410, 122503, 21745, 24786, 10428, 26917, 91822, 11149 |
-| No credentials | 110723, or plugin 19506 showing Credentialed Checks: no |
-| Unknown | No authentication evidence found |
-
-## Important notes
-
-1. Nessus/Tenable does not provide one direct endpoint like “find IP in any folder”. The tool builds a local match table by joining folders, scans, scan histories, and hosts.
-2. CSV export mode is slower but more reliable for final evidence.
-3. Very old scans may require export mode because host details can be unavailable through direct host APIs.
-4. Folder visibility depends on the API user's permission. If your API key cannot view a folder/scan, the tool cannot report it.
-5. Do not share your API keys. Enter them only in the local GUI.
+The tests cover configured-target fallback, DNS-name host resolution, no-history reporting, CIDR normalization, and latest-history authentication selection.
 
 ## Troubleshooting
 
-### 401 invalid API key
-Check Access Key and Secret Key. Do not include extra spaces.
-
-### 403 permission issue
-The API user may not have permission to view or export scans.
-
-### 429 rate limit
-Reduce the number of scans, use date filter, or wait and run again.
-
-### Standalone Nessus certificate error
-Uncheck **Verify SSL certificate** in the sidebar.
-
-### CSV export is slow
-Use Fast API mode first. Then use CSV Export mode only for the final selected date/folder scope.
+- **IP shows Configured target:** The scan exists and contains the IP, but the selected history did not return a directly mappable host result. Check the Result Note and try CSV export mode.
+- **IP shows Scan name only:** Open the scan and verify that the configured target is the same IP.
+- **401:** Check the access and secret keys.
+- **403:** The API account cannot view or export that scan.
+- **429:** Reduce the scan scope or retry after the rate-limit window.
+- **Archived scan:** Use Reliable CSV export mode.
