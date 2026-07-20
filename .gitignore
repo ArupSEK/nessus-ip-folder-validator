@@ -10,6 +10,8 @@ env/
 
 # Streamlit / local secrets
 .streamlit/secrets.toml
+.nessus_ip_validator_auth.json
+*.nessus_ip_validator_auth.json
 
 # Reports and exports
 *.xlsx
