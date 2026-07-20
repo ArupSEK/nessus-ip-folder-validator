@@ -2,6 +2,48 @@
 
 A Streamlit GUI that checks a CSV/Excel IP list against Nessus or Tenable scans, folders, latest scan history, configured targets, host results, and authentication evidence.
 
+## Secure local login
+
+The application now opens with a Trinetra-style login page.
+
+- On the first launch, create a local administrator username and password.
+- Later launches require that account before the Nessus dashboard is displayed.
+- The plaintext password is never stored.
+- A random salt and PBKDF2-HMAC-SHA256 password hash are stored in the local user profile.
+- After five incorrect attempts, the current browser session is temporarily locked for 30 seconds.
+- The sidebar provides a **Sign Out** button that also clears Nessus API keys and generated results from the Streamlit session.
+
+Default local login file:
+
+```text
+Linux/macOS: ~/.nessus_ip_validator_auth.json
+Windows:     %USERPROFILE%\.nessus_ip_validator_auth.json
+```
+
+The file is created with restricted permissions where the operating system supports them. It is outside the repository and is also covered by `.gitignore` patterns.
+
+To use a different location, set this environment variable before starting Streamlit:
+
+```bash
+export NESSUS_VALIDATOR_AUTH_FILE=/secure/path/nessus-validator-auth.json
+```
+
+To reset a forgotten local login, stop the application and delete the login file. The next launch will show the first-run account creation page again.
+
+Linux/macOS:
+
+```bash
+rm ~/.nessus_ip_validator_auth.json
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item "$HOME\.nessus_ip_validator_auth.json"
+```
+
+Deleting this file resets only the dashboard login. It does not modify Nessus, Tenable, scans, or API accounts.
+
 ## Fixed IP-detection logic
 
 The validator no longer marks an IP as **Not Found** only because the scan-details API returned an empty host list or returned the host as a DNS name.
@@ -138,10 +180,12 @@ Use an API account that can view the required folders and scans. For a self-sign
 python -m unittest discover -s tests -v
 ```
 
-The tests cover configured-target fallback, DNS-name host resolution, no-history reporting, CIDR normalization, and latest-history authentication selection.
+The tests cover local login hashing and verification, configured-target fallback, DNS-name host resolution, no-history reporting, CIDR normalization, and latest-history authentication selection.
 
 ## Troubleshooting
 
+- **Forgot local login:** Stop Streamlit, delete `~/.nessus_ip_validator_auth.json`, and start it again.
+- **Login temporarily locked:** Wait 30 seconds or open a fresh browser session.
 - **IP shows Configured target:** The scan exists and contains the IP, but the selected history did not return a directly mappable host result. Check the Result Note and try CSV export mode.
 - **IP shows Scan name only:** Open the scan and verify that the configured target is the same IP.
 - **401:** Check the access and secret keys.
