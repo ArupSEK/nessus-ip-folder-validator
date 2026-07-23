@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -e
-python3 -m venv .venv
+
+cd "$(dirname "$0")"
+
+if [ ! -d ".venv" ]; then
+    python3 -m venv .venv
+fi
+
 source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+
+python -m pip install \
+    --trusted-host pypi.org \
+    --trusted-host files.pythonhosted.org \
+    -r requirements.txt
+
+python -m streamlit run app.py
