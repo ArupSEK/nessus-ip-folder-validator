@@ -10,19 +10,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from cryptography.fernet import Fernet, InvalidToken
+
 AUTH_ITERATIONS = 310_000
+VAULT_ITERATIONS = 390_000
 DEFAULT_AUTH_PATH = Path.home() / ".nessus_ip_validator_auth.json"
 
 
 class LocalAuthError(ValueError):
-    """Raised when local login configuration is invalid."""
+    """Raised when local login or encrypted settings are invalid."""
 
 
 class LocalAuthManager:
-    """Store and verify one local administrator account.
+    """Store one local administrator and an encrypted Nessus connection.
 
-    Only a PBKDF2-HMAC-SHA256 password hash and random salt are written to disk.
-    The plaintext password is never stored.
+    The password is stored only as a salted PBKDF2-HMAC-SHA256 hash. Nessus
+    connection details are encrypted with a separate password-derived Fernet
+    key and are removed when the local account is reset.
     """
 
     def __init__(self, path: Optional[Path] = None) -> None:
@@ -78,18 +82,37 @@ class LocalAuthManager:
             iterations,
         )
 
+    @staticmethod
+    def derive_vault_key(
+        password: str,
+        salt: bytes,
+        iterations: int = VAULT_ITERATIONS,
+    ) -> bytes:
+        raw_key = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+            dklen=32,
+        )
+        return base64.urlsafe_b64encode(raw_key)
+
     def configure(self, username: str, password: str) -> None:
         username = self._validate_username(username)
         self._validate_password(password)
 
         salt = secrets.token_bytes(16)
+        vault_salt = secrets.token_bytes(16)
         password_hash = self.hash_password(password, salt)
         payload = {
-            "version": 1,
+            "version": 2,
             "username": username,
             "salt": base64.b64encode(salt).decode("ascii"),
             "password_hash": base64.b64encode(password_hash).decode("ascii"),
             "iterations": AUTH_ITERATIONS,
+            "vault_salt": base64.b64encode(vault_salt).decode("ascii"),
+            "vault_iterations": VAULT_ITERATIONS,
+            "encrypted_connection": "",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._write_atomic(payload)
@@ -140,3 +163,72 @@ class LocalAuthManager:
         except (ValueError, TypeError, OverflowError):
             return False
         return username_matches and hmac.compare_digest(actual, expected)
+
+    def unlock(self, password: str) -> tuple[bytes, dict[str, Any]]:
+        """Unlock the encrypted connection after password verification.
+
+        Existing version-1 login files are upgraded in place by adding a
+        separate vault salt; they continue to use the same username/password.
+        """
+        payload = self.load()
+        if not self.is_configured():
+            raise LocalAuthError("The local account is not configured.")
+
+        vault_salt_text = str(payload.get("vault_salt", ""))
+        if not vault_salt_text:
+            vault_salt = secrets.token_bytes(16)
+            payload["version"] = 2
+            payload["vault_salt"] = base64.b64encode(vault_salt).decode("ascii")
+            payload["vault_iterations"] = VAULT_ITERATIONS
+            payload.setdefault("encrypted_connection", "")
+            self._write_atomic(payload)
+        else:
+            try:
+                vault_salt = base64.b64decode(vault_salt_text, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise LocalAuthError("The encrypted settings vault is corrupted.") from exc
+
+        try:
+            iterations = int(payload.get("vault_iterations", VAULT_ITERATIONS))
+        except (TypeError, ValueError) as exc:
+            raise LocalAuthError("The encrypted settings vault is corrupted.") from exc
+        if iterations < 100_000 or iterations > 5_000_000:
+            raise LocalAuthError("The encrypted settings vault is corrupted.")
+
+        key = self.derive_vault_key(password, vault_salt, iterations)
+        encrypted = str(payload.get("encrypted_connection", "") or "").strip()
+        if not encrypted:
+            return key, {}
+        try:
+            cleartext = Fernet(key).decrypt(encrypted.encode("ascii"))
+            connection = json.loads(cleartext.decode("utf-8"))
+        except (InvalidToken, ValueError, TypeError, UnicodeDecodeError) as exc:
+            raise LocalAuthError(
+                "Saved connection details could not be decrypted. Reset the local "
+                "account if its password was changed outside this application."
+            ) from exc
+        if not isinstance(connection, dict):
+            raise LocalAuthError("Saved connection details are invalid.")
+        return key, connection
+
+    def save_connection(self, connection: dict[str, Any], vault_key: bytes) -> None:
+        payload = self.load()
+        if not self.is_configured():
+            raise LocalAuthError("The local account is not configured.")
+        cleartext = json.dumps(connection, separators=(",", ":")).encode("utf-8")
+        payload["version"] = 2
+        payload["encrypted_connection"] = Fernet(vault_key).encrypt(cleartext).decode("ascii")
+        payload["connection_updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._write_atomic(payload)
+
+    def reset_account(self) -> None:
+        """Delete the login and encrypted Nessus connection from this device."""
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise LocalAuthError(f"Could not reset the local account: {exc}") from exc
+        for temporary_path in self.path.parent.glob(f".{self.path.name}.*.tmp"):
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
