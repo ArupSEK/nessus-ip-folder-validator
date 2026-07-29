@@ -7,8 +7,9 @@ from datetime import datetime, time, timezone
 import pandas as pd
 import streamlit as st
 
+from connection_config import ConnectionConfigError, validate_connection
 from ip_utils import normalize_ip
-from local_auth import LocalAuthManager
+from local_auth import LocalAuthError, LocalAuthManager
 from nessus_fixed import NessusAPIError, make_scan_records, summarize_results, unix_from_date
 from two_step_validation import (
     NessusClient,
@@ -22,12 +23,34 @@ st.set_page_config(page_title="Nessus IP Validator", page_icon="🛡️", layout
 
 def clear_session() -> None:
     for key in (
-        "authenticated", "authenticated_user", "access_key", "secret_key",
+        "authenticated", "authenticated_user", "vault_key", "saved_connection",
+        "base_url", "access_key", "secret_key", "verify_ssl", "timeout",
+        "connection_base_url", "connection_access_key", "connection_secret_key",
+        "connection_verify_ssl", "connection_timeout",
         "summary", "details", "auth_rows", "invalid_rows", "work_df",
         "scan_records", "discovery_stats", "deep_stats", "deep_notice",
         "deep_selection_editor", "login_failed_attempts", "login_lockout_until",
+        "reset_account_confirmation",
     ):
         st.session_state.pop(key, None)
+
+
+def activate_connection(connection: dict) -> None:
+    """Copy only verified, encrypted-at-rest settings into active session keys."""
+    for key in ("base_url", "access_key", "secret_key", "verify_ssl", "timeout"):
+        st.session_state[key] = connection[key]
+
+
+def initialize_connection_form(connection: dict) -> None:
+    defaults = {
+        "connection_base_url": connection.get("base_url", ""),
+        "connection_access_key": connection.get("access_key", ""),
+        "connection_secret_key": connection.get("secret_key", ""),
+        "connection_verify_ssl": connection.get("verify_ssl", True),
+        "connection_timeout": int(connection.get("timeout", 90) or 90),
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
 
 def lock_seconds() -> int:
@@ -36,24 +59,38 @@ def lock_seconds() -> int:
 
 
 def require_login(auth: LocalAuthManager) -> None:
-    if st.session_state.get("authenticated"):
+    if st.session_state.get("authenticated") and st.session_state.get("vault_key"):
         return
+    if st.session_state.get("authenticated"):
+        clear_session()
+
     st.title("🛡️ Nessus IP Validation Platform")
     setup = not auth.is_configured()
     if setup:
         st.subheader("Create local administrator login")
         with st.form("create_login"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            confirm = st.text_input("Confirm password", type="password")
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input(
+                "Password", type="password", autocomplete="new-password"
+            )
+            confirm = st.text_input(
+                "Confirm password", type="password", autocomplete="new-password"
+            )
             submitted = st.form_submit_button("Create Login", type="primary")
         if submitted:
             try:
                 if password != confirm:
-                    raise ValueError("Passwords do not match.")
+                    raise LocalAuthError("Passwords do not match.")
                 auth.configure(username, password)
-                st.session_state["authenticated"] = True
-                st.session_state["authenticated_user"] = username.strip()
+                vault_key, connection = auth.unlock(password)
+                st.session_state.update(
+                    authenticated=True,
+                    authenticated_user=username.strip(),
+                    vault_key=vault_key,
+                    saved_connection=connection,
+                )
+                if connection:
+                    activate_connection(connection)
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
@@ -62,31 +99,158 @@ def require_login(auth: LocalAuthManager) -> None:
         if remaining:
             st.warning(f"Too many failed attempts. Try again in {remaining} seconds.")
         with st.form("login"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input(
+                "Password", type="password", autocomplete="current-password"
+            )
             submitted = st.form_submit_button(
                 "Sign In", type="primary", disabled=remaining > 0
             )
         if submitted:
             if auth.verify(username, password):
-                st.session_state["authenticated"] = True
-                st.session_state["authenticated_user"] = username.strip()
-                st.session_state["login_failed_attempts"] = 0
-                st.session_state["login_lockout_until"] = 0.0
-                st.rerun()
-            failed = int(st.session_state.get("login_failed_attempts", 0)) + 1
-            if failed >= 5:
-                st.session_state["login_failed_attempts"] = 0
-                st.session_state["login_lockout_until"] = time_module.time() + 30
-                st.error("Invalid credentials. Login is locked for 30 seconds.")
+                try:
+                    vault_key, connection = auth.unlock(password)
+                except LocalAuthError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state.update(
+                        authenticated=True,
+                        authenticated_user=username.strip(),
+                        vault_key=vault_key,
+                        saved_connection=connection,
+                        login_failed_attempts=0,
+                        login_lockout_until=0.0,
+                    )
+                    if connection:
+                        activate_connection(connection)
+                    st.rerun()
             else:
-                st.session_state["login_failed_attempts"] = failed
-                st.error(f"Invalid credentials. {5 - failed} attempt(s) remain.")
-    st.caption("The local password is stored only as a salted PBKDF2 hash.")
+                failed = int(st.session_state.get("login_failed_attempts", 0)) + 1
+                if failed >= 5:
+                    st.session_state["login_failed_attempts"] = 0
+                    st.session_state["login_lockout_until"] = time_module.time() + 30
+                    st.error("Invalid credentials. Login is locked for 30 seconds.")
+                else:
+                    st.session_state["login_failed_attempts"] = failed
+                    st.error(f"Invalid credentials. {5 - failed} attempt(s) remain.")
+
+        with st.expander("Forgot Password / Reset Account"):
+            st.warning(
+                "Resetting removes the local login and the saved encrypted Nessus "
+                "URL, Access Key, and Secret Key from this device."
+            )
+            confirmation = st.text_input(
+                "Type RESET to confirm",
+                key="reset_account_confirmation",
+                autocomplete="off",
+            )
+            if st.button(
+                "Reset Account and Forget Saved Connection",
+                disabled=confirmation.strip().upper() != "RESET",
+                use_container_width=True,
+            ):
+                try:
+                    auth.reset_account()
+                    clear_session()
+                    st.rerun()
+                except LocalAuthError as exc:
+                    st.error(str(exc))
+
+    st.caption(
+        "The local password is stored only as a salted PBKDF2 hash. Saved API "
+        "credentials are encrypted with a separate password-derived key."
+    )
     st.stop()
 
 
+def render_connection_form(auth: LocalAuthManager, *, required: bool = False) -> bool:
+    """Render explicit connection setup and persist only after an API test."""
+    saved = st.session_state.get("saved_connection", {}) or {}
+    initialize_connection_form(saved)
+
+    if required:
+        st.subheader("Required Nessus / Tenable Connection")
+        st.info(
+            "Enter and verify all mandatory connection fields. The dashboard will "
+            "open only after the API connection succeeds."
+        )
+
+    with st.form("connection_settings_form"):
+        st.text_input(
+            "Nessus / Tenable Base URL",
+            key="connection_base_url",
+            placeholder="https://cloud.tenable.com or https://server:8834",
+            autocomplete="off",
+        )
+        st.text_input(
+            "Access Key",
+            type="password",
+            key="connection_access_key",
+            autocomplete="new-password",
+        )
+        st.text_input(
+            "Secret Key",
+            type="password",
+            key="connection_secret_key",
+            autocomplete="new-password",
+        )
+        st.checkbox(
+            "Verify SSL certificate",
+            key="connection_verify_ssl",
+        )
+        st.number_input(
+            "API timeout seconds",
+            min_value=15,
+            max_value=300,
+            step=15,
+            key="connection_timeout",
+        )
+        submitted = st.form_submit_button(
+            "Save and Verify Connection", type="primary", use_container_width=True
+        )
+
+    if not submitted:
+        return False
+
+    try:
+        connection = validate_connection(
+            st.session_state.get("connection_base_url"),
+            st.session_state.get("connection_access_key"),
+            st.session_state.get("connection_secret_key"),
+            st.session_state.get("connection_verify_ssl", True),
+            st.session_state.get("connection_timeout", 90),
+        )
+        client = NessusClient(**connection)
+        folder_count, scan_count = client.test_connection()
+        auth.save_connection(connection, st.session_state["vault_key"])
+    except ConnectionConfigError as exc:
+        st.error(str(exc))
+        return False
+    except Exception as exc:
+        st.error(
+            "Connection verification failed. Nothing was saved. "
+            f"Check the URL, API keys, SSL setting, and network access. Details: {exc}"
+        )
+        return False
+
+    st.session_state["saved_connection"] = connection
+    activate_connection(connection)
+    st.success(
+        f"Connection verified and encrypted locally. Accessible folders: "
+        f"{folder_count}; scans: {scan_count}."
+    )
+    st.rerun()
+    return True
+
+
 def build_client() -> NessusClient:
+    required = ("base_url", "access_key", "secret_key", "verify_ssl", "timeout")
+    missing = [key for key in required if key not in st.session_state]
+    if missing:
+        raise ConnectionConfigError(
+            "No verified saved connection is active. Sign in and save the "
+            "connection settings again."
+        )
     return NessusClient(
         base_url=st.session_state["base_url"],
         access_key=st.session_state["access_key"],
@@ -155,17 +319,25 @@ def latest_rows(details: pd.DataFrame) -> pd.DataFrame:
 AUTH = LocalAuthManager()
 require_login(AUTH)
 
+saved_connection = st.session_state.get("saved_connection", {}) or {}
+if saved_connection:
+    activate_connection(saved_connection)
+else:
+    st.title("🛡️ Nessus IP-to-Folder Validator")
+    render_connection_form(AUTH, required=True)
+    st.stop()
+
 with st.sidebar:
-    st.success(f"👤 {st.session_state.get('authenticated_user', AUTH.configured_username())}")
+    st.success(
+        f"👤 {st.session_state.get('authenticated_user', AUTH.configured_username())}"
+    )
+    st.caption(f"Saved connection: {saved_connection.get('base_url', '')}")
     if st.button("Sign Out", use_container_width=True):
         clear_session()
         st.rerun()
-    st.header("Connection")
-    st.text_input("Nessus / Tenable Base URL", value="https://cloud.tenable.com", key="base_url")
-    st.text_input("Access Key", type="password", key="access_key")
-    st.text_input("Secret Key", type="password", key="secret_key")
-    st.checkbox("Verify SSL certificate", value=True, key="verify_ssl")
-    st.number_input("API timeout seconds", min_value=15, max_value=300, value=90, step=15, key="timeout")
+
+    with st.expander("Edit Saved Connection"):
+        render_connection_form(AUTH)
 
     st.header("Low API Discovery")
     fallback_all = st.checkbox(

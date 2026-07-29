@@ -51,6 +51,46 @@ class LocalAuthManagerTests(unittest.TestCase):
         self.assertFalse(self.auth.is_configured())
         self.assertFalse(self.auth.verify("admin", "StrongPass123!"))
 
+    def test_encrypts_and_restores_connection(self) -> None:
+        password = "StrongPass123!"
+        self.auth.configure("admin", password)
+        key, saved = self.auth.unlock(password)
+        self.assertEqual(saved, {})
+
+        connection = {
+            "base_url": "https://cloud.tenable.com",
+            "access_key": "access-value",
+            "secret_key": "secret-value",
+            "verify_ssl": True,
+            "timeout": 90,
+        }
+        self.auth.save_connection(connection, key)
+
+        raw = self.auth_path.read_text(encoding="utf-8")
+        self.assertNotIn("access-value", raw)
+        self.assertNotIn("secret-value", raw)
+        _, restored = self.auth.unlock(password)
+        self.assertEqual(restored, connection)
+
+    def test_wrong_password_cannot_unlock_saved_connection(self) -> None:
+        password = "StrongPass123!"
+        self.auth.configure("admin", password)
+        key, _ = self.auth.unlock(password)
+        self.auth.save_connection({"secret_key": "secret-value"}, key)
+
+        with self.assertRaises(LocalAuthError):
+            self.auth.unlock("AnotherPass123!")
+
+    def test_reset_account_deletes_login_and_connection(self) -> None:
+        password = "StrongPass123!"
+        self.auth.configure("admin", password)
+        key, _ = self.auth.unlock(password)
+        self.auth.save_connection({"secret_key": "secret-value"}, key)
+
+        self.auth.reset_account()
+        self.assertFalse(self.auth_path.exists())
+        self.assertFalse(self.auth.is_configured())
+
 
 if __name__ == "__main__":
     unittest.main()
