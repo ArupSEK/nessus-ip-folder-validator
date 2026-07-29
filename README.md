@@ -11,7 +11,11 @@ The application now opens with a Trinetra-style login page.
 - The plaintext password is never stored.
 - A random salt and PBKDF2-HMAC-SHA256 password hash are stored in the local user profile.
 - After five incorrect attempts, the current browser session is temporarily locked for 30 seconds.
-- The sidebar provides a **Sign Out** button that also clears Nessus API keys and generated results from the Streamlit session.
+- The sidebar provides a **Sign Out** button that clears API keys and generated results only from the active browser session.
+- After login, the Nessus/Tenable URL, Access Key, and Secret Key must pass a live API connection test before the dashboard opens.
+- Verified connection details are encrypted locally with a separate password-derived Fernet key and automatically restored after the next successful login.
+- Browser autofill is disabled for API fields, and draft values never become the active connection until **Save and Verify Connection** succeeds.
+- **Forgot Password / Reset Account** deletes both the local login and the encrypted saved connection.
 
 Default local login file:
 
@@ -42,7 +46,7 @@ Windows PowerShell:
 Remove-Item "$HOME\.nessus_ip_validator_auth.json"
 ```
 
-Deleting this file resets only the dashboard login. It does not modify Nessus, Tenable, scans, or API accounts.
+Deleting this file resets the dashboard login and removes the locally encrypted Nessus/Tenable connection settings. It does not modify Nessus, Tenable, scans, or API accounts.
 
 ## Fixed IP-detection logic
 
@@ -192,11 +196,13 @@ Use an API account that can view the required folders and scans. For a self-sign
 python -m unittest discover -s tests -v
 ```
 
-The tests cover local login hashing and verification, configured-target fallback, DNS-name host resolution, no-history reporting, CIDR normalization, latest-history authentication selection, candidate-only discovery, and scan-grouped deep validation.
+The tests cover local login hashing and verification, encrypted connection persistence, mandatory connection validation, configured-target fallback, DNS-name host resolution, no-history reporting, CIDR normalization, latest-history authentication selection, candidate-only discovery, and scan-grouped deep validation.
 
 ## Troubleshooting
 
-- **Forgot local login:** Stop Streamlit, delete `~/.nessus_ip_validator_auth.json`, and start it again.
+- **Forgot local login:** Open **Forgot Password / Reset Account**, type `RESET`, and confirm. You can also stop Streamlit and delete `~/.nessus_ip_validator_auth.json`. Both methods remove the saved encrypted connection from this device.
+- **Connection fields appear filled by the browser:** API fields use browser-autofill protection and are isolated from the active connection. Click **Save and Verify Connection**; unverified draft values are never used.
+- **Blank screen after login:** Restart with the latest code. The dashboard now stops on a visible required-connection form until the URL and both API keys pass validation. Any backend exception is displayed instead of silently activating incomplete values.
 - **Login temporarily locked:** Wait 30 seconds or open a fresh browser session.
 - **IP shows Configured target:** The scan exists and contains the IP, but discovery did not return a directly mappable host result. Select it and run Deep Validation.
 - **IP is not located in low-API discovery:** Enable Fallback search across all scans and run discovery again.
