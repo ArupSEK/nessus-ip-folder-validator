@@ -21,6 +21,183 @@ from two_step_validation import (
 st.set_page_config(page_title="Nessus IP Validator", page_icon="🛡️", layout="wide")
 
 
+def init_session_state() -> None:
+    defaults = {
+        "theme_mode": "Dark",
+        "preview_rows": 500,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def current_theme() -> dict[str, str]:
+    if st.session_state.get("theme_mode", "Dark") == "Light":
+        return {
+            "bg": "#F3F7FB",
+            "panel": "#FFFFFF",
+            "panel_alt": "#E8F0FA",
+            "hero": "#DCEAFE",
+            "text": "#0F172A",
+            "muted": "#475569",
+            "accent": "#0891B2",
+            "accent_2": "#2563EB",
+            "border": "#CBD5E1",
+            "success": "#166534",
+            "warning": "#9A3412",
+            "danger": "#B91C1C",
+        }
+    return {
+        "bg": "#07111F",
+        "panel": "#0B1726",
+        "panel_alt": "#0F1E30",
+        "hero": "#06111F",
+        "text": "#F8FAFC",
+        "muted": "#94A3B8",
+        "accent": "#14B8A6",
+        "accent_2": "#06B6D4",
+        "border": "#1E3A5F",
+        "success": "#86EFAC",
+        "warning": "#FCD34D",
+        "danger": "#FCA5A5",
+    }
+
+
+def inject_theme_css() -> None:
+    theme = current_theme()
+    st.markdown(
+        f"""
+<style>
+:root {{
+  --bg: {theme["bg"]};
+  --panel: {theme["panel"]};
+  --panel-alt: {theme["panel_alt"]};
+  --hero: {theme["hero"]};
+  --text: {theme["text"]};
+  --muted: {theme["muted"]};
+  --accent: {theme["accent"]};
+  --accent-2: {theme["accent_2"]};
+  --border: {theme["border"]};
+  --success: {theme["success"]};
+  --warning: {theme["warning"]};
+  --danger: {theme["danger"]};
+}}
+[data-testid="stAppViewContainer"] {{
+  background: var(--bg);
+}}
+[data-testid="stHeader"] {{
+  background: transparent;
+}}
+[data-testid="stSidebar"] {{
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}}
+.block-container {{
+  padding-top: 1.25rem;
+  padding-bottom: 2rem;
+}}
+.app-shell {{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.15rem 1.25rem;
+  margin-bottom: 1rem;
+}}
+.login-shell {{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 640px;
+  overflow: hidden;
+}}
+.login-panel {{
+  padding: 2.2rem 2rem 1.8rem 2rem;
+}}
+.hero-panel {{
+  background:
+    linear-gradient(140deg, rgba(6,182,212,0.20), rgba(37,99,235,0.08)),
+    linear-gradient(180deg, var(--hero), var(--panel));
+  min-height: 640px;
+  padding: 2.6rem 2.2rem;
+  border-left: 1px solid var(--border);
+}}
+.eyebrow {{
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}}
+.hero-title {{
+  color: var(--text);
+  font-size: 2.35rem;
+  line-height: 1.04;
+  font-weight: 700;
+  margin: 0.6rem 0 1rem 0;
+}}
+.hero-copy, .muted-copy {{
+  color: var(--muted);
+  font-size: 0.98rem;
+}}
+.brand-kicker {{
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+}}
+.login-title {{
+  color: var(--text);
+  font-size: 1.85rem;
+  font-weight: 700;
+  margin: 0.35rem 0 0.35rem 0;
+}}
+.status-grid {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 2rem;
+}}
+.status-card {{
+  background: rgba(15, 30, 48, 0.44);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.95rem;
+}}
+.status-label {{
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+}}
+.status-value {{
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 700;
+}}
+.note-band {{
+  margin-top: 1.2rem;
+  padding: 0.95rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-alt);
+  color: var(--muted);
+}}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_theme_picker(location_key: str) -> None:
+    selection = st.radio(
+        "Theme",
+        options=["Dark", "Light"],
+        index=0 if st.session_state.get("theme_mode", "Dark") == "Dark" else 1,
+        horizontal=True,
+        key=location_key,
+        label_visibility="collapsed",
+    )
+    st.session_state["theme_mode"] = selection
+
+
 def clear_session() -> None:
     for key in (
         "authenticated", "authenticated_user", "vault_key", "saved_connection",
@@ -64,102 +241,156 @@ def require_login(auth: LocalAuthManager) -> None:
     if st.session_state.get("authenticated"):
         clear_session()
 
-    st.title("🛡️ Nessus IP Validation Platform")
     setup = not auth.is_configured()
-    if setup:
-        st.subheader("Create local administrator login")
-        with st.form("create_login"):
-            username = st.text_input("Username", autocomplete="username")
-            password = st.text_input(
-                "Password", type="password", autocomplete="new-password"
-            )
-            confirm = st.text_input(
-                "Confirm password", type="password", autocomplete="new-password"
-            )
-            submitted = st.form_submit_button("Create Login", type="primary")
-        if submitted:
-            try:
-                if password != confirm:
-                    raise LocalAuthError("Passwords do not match.")
-                auth.configure(username, password)
-                vault_key, connection = auth.unlock(password)
-                st.session_state.update(
-                    authenticated=True,
-                    authenticated_user=username.strip(),
-                    vault_key=vault_key,
-                    saved_connection=connection,
-                )
-                if connection:
-                    activate_connection(connection)
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-    else:
-        remaining = lock_seconds()
-        if remaining:
-            st.warning(f"Too many failed attempts. Try again in {remaining} seconds.")
-        with st.form("login"):
-            username = st.text_input("Username", autocomplete="username")
-            password = st.text_input(
-                "Password", type="password", autocomplete="current-password"
-            )
-            submitted = st.form_submit_button(
-                "Sign In", type="primary", disabled=remaining > 0
-            )
-        if submitted:
-            if auth.verify(username, password):
+    theme = current_theme()
+    remaining = lock_seconds()
+
+    top_left, top_right = st.columns([0.8, 0.2])
+    with top_left:
+        st.markdown('<div class="brand-kicker">TRINETRA-STYLE ACCESS</div>', unsafe_allow_html=True)
+    with top_right:
+        render_theme_picker("login_theme_picker")
+
+    left, right = st.columns([0.92, 1.08], gap="large")
+
+    with left:
+        st.markdown('<div class="login-shell"><div class="login-panel">', unsafe_allow_html=True)
+        st.markdown('<div class="brand-kicker">AEGISMAP</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="login-title">{"Create login" if setup else "Login"}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="muted-copy">{"Set up local access for this workstation." if setup else "Sign in to open the validator dashboard."}</div>',
+            unsafe_allow_html=True,
+        )
+
+        show_password = st.checkbox("Show password", key="login_show_password")
+        password_type = "default" if show_password else "password"
+
+        if setup:
+            with st.form("create_login", clear_on_submit=False):
+                username = st.text_input("Username", autocomplete="username")
+                password = st.text_input("Password", type=password_type, autocomplete="new-password")
+                confirm = st.text_input("Confirm password", type=password_type, autocomplete="new-password")
+                submitted = st.form_submit_button("Create Login", type="primary", use_container_width=True)
+            if submitted:
                 try:
+                    if password != confirm:
+                        raise LocalAuthError("Passwords do not match.")
+                    auth.configure(username, password)
                     vault_key, connection = auth.unlock(password)
-                except LocalAuthError as exc:
-                    st.error(str(exc))
-                else:
                     st.session_state.update(
                         authenticated=True,
                         authenticated_user=username.strip(),
                         vault_key=vault_key,
                         saved_connection=connection,
-                        login_failed_attempts=0,
-                        login_lockout_until=0.0,
                     )
                     if connection:
                         activate_connection(connection)
                     st.rerun()
-            else:
-                failed = int(st.session_state.get("login_failed_attempts", 0)) + 1
-                if failed >= 5:
-                    st.session_state["login_failed_attempts"] = 0
-                    st.session_state["login_lockout_until"] = time_module.time() + 30
-                    st.error("Invalid credentials. Login is locked for 30 seconds.")
-                else:
-                    st.session_state["login_failed_attempts"] = failed
-                    st.error(f"Invalid credentials. {5 - failed} attempt(s) remain.")
-
-        with st.expander("Forgot Password / Reset Account"):
-            st.warning(
-                "Resetting removes the local login and the saved encrypted Nessus "
-                "URL, Access Key, and Secret Key from this device."
-            )
-            confirmation = st.text_input(
-                "Type RESET to confirm",
-                key="reset_account_confirmation",
-                autocomplete="off",
-            )
-            if st.button(
-                "Reset Account and Forget Saved Connection",
-                disabled=confirmation.strip().upper() != "RESET",
-                use_container_width=True,
-            ):
-                try:
-                    auth.reset_account()
-                    clear_session()
-                    st.rerun()
-                except LocalAuthError as exc:
+                except Exception as exc:
                     st.error(str(exc))
+        else:
+            if remaining:
+                st.warning(f"Too many failed attempts. Try again in {remaining} seconds.")
+            with st.form("login", clear_on_submit=False):
+                username = st.text_input("Username", autocomplete="username")
+                password = st.text_input("Password", type=password_type, autocomplete="current-password")
+                submitted = st.form_submit_button("Sign In", type="primary", disabled=remaining > 0, use_container_width=True)
+            if submitted:
+                if auth.verify(username, password):
+                    try:
+                        vault_key, connection = auth.unlock(password)
+                    except LocalAuthError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state.update(
+                            authenticated=True,
+                            authenticated_user=username.strip(),
+                            vault_key=vault_key,
+                            saved_connection=connection,
+                            login_failed_attempts=0,
+                            login_lockout_until=0.0,
+                        )
+                        if connection:
+                            activate_connection(connection)
+                        st.rerun()
+                else:
+                    failed = int(st.session_state.get("login_failed_attempts", 0)) + 1
+                    if failed >= 5:
+                        st.session_state["login_failed_attempts"] = 0
+                        st.session_state["login_lockout_until"] = time_module.time() + 30
+                        st.error("Invalid credentials. Login is locked for 30 seconds.")
+                    else:
+                        st.session_state["login_failed_attempts"] = failed
+                        st.error(f"Invalid credentials. {5 - failed} attempt(s) remain.")
 
-    st.caption(
-        "The local password is stored only as a salted PBKDF2 hash. Saved API "
-        "credentials are encrypted with a separate password-derived key."
-    )
+            with st.expander("Forgot Password / Reset Account"):
+                st.warning(
+                    "Resetting removes the local login and the saved encrypted Nessus "
+                    "URL, Access Key, and Secret Key from this device."
+                )
+                confirmation = st.text_input(
+                    "Type RESET to confirm",
+                    key="reset_account_confirmation",
+                    autocomplete="off",
+                )
+                if st.button(
+                    "Reset Account and Forget Saved Connection",
+                    disabled=confirmation.strip().upper() != "RESET",
+                    use_container_width=True,
+                ):
+                    try:
+                        auth.reset_account()
+                        clear_session()
+                        st.rerun()
+                    except LocalAuthError as exc:
+                        st.error(str(exc))
+
+        st.markdown(
+            """
+            <div class="note-band">
+              The local password is stored only as a salted PBKDF2 hash. Saved API credentials are encrypted with a separate password-derived key.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+    with right:
+        st.markdown(
+            f"""
+            <div class="hero-panel">
+              <div class="eyebrow">Authentication visibility</div>
+              <div class="hero-title">Credential<br>Trust Center</div>
+              <div class="hero-copy">Validate Nessus IP coverage, exact folder placement, and authentication evidence from one controlled interface.</div>
+              <div class="status-grid">
+                <div class="status-card">
+                  <div class="status-label" style="color:{theme["success"]};">Verified</div>
+                  <div class="status-value">Locate assets in the right folder and scan history.</div>
+                </div>
+                <div class="status-card">
+                  <div class="status-label" style="color:{theme["danger"]};">Needs action</div>
+                  <div class="status-value">Surface missing assets and failed credential evidence quickly.</div>
+                </div>
+                <div class="status-card">
+                  <div class="status-label" style="color:{theme["accent"]};">Low API discovery</div>
+                  <div class="status-value">Open only candidate scan summaries for first-pass location checks.</div>
+                </div>
+                <div class="status-card">
+                  <div class="status-label" style="color:{theme["warning"]};">Deep validation</div>
+                  <div class="status-value">Use host details or CSV export only on selected IPs that need proof.</div>
+                </div>
+              </div>
+              <div class="note-band">
+                Built for controlled Nessus validation with local sign-in, encrypted saved connection, and switchable dark or light presentation.
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.stop()
 
 
@@ -295,6 +526,12 @@ def report_excel(summary: pd.DataFrame, details: pd.DataFrame, auth: pd.DataFram
     return output.getvalue()
 
 
+def preview_dataframe(frame: pd.DataFrame, max_rows: int) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    return frame.head(max(int(max_rows), 1)).copy()
+
+
 def latest_rows(details: pd.DataFrame) -> pd.DataFrame:
     if details.empty:
         return pd.DataFrame()
@@ -317,6 +554,8 @@ def latest_rows(details: pd.DataFrame) -> pd.DataFrame:
 
 
 AUTH = LocalAuthManager()
+init_session_state()
+inject_theme_css()
 require_login(AUTH)
 
 saved_connection = st.session_state.get("saved_connection", {}) or {}
@@ -331,6 +570,7 @@ with st.sidebar:
     st.success(
         f"👤 {st.session_state.get('authenticated_user', AUTH.configured_username())}"
     )
+    render_theme_picker("app_theme_picker")
     st.caption(f"Saved connection: {saved_connection.get('base_url', '')}")
     if st.button("Sign Out", use_container_width=True):
         clear_session()
@@ -357,9 +597,18 @@ with st.sidebar:
         ("Host details (lower API usage)", "CSV export (exact plugin output)"),
     )
     deep_method = "csv_export" if deep_label.startswith("CSV") else "host_details"
+    st.number_input("Rows to preview in app", min_value=50, max_value=5000, value=500, step=50, key="preview_rows")
 
-st.title("🛡️ Nessus IP-to-Folder Validator")
-st.caption("First locate the exact folder and scan with low API use, then deep-validate only selected IPs.")
+st.markdown(
+    """
+    <div class="app-shell">
+      <div class="brand-kicker">AEGISMAP</div>
+      <div class="login-title">Nessus IP-to-Folder Validator</div>
+      <div class="muted-copy">First locate the exact folder and scan with low API use, then deep-validate only selected IPs.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 left, right = st.columns([0.62, 0.38])
 with left:
@@ -450,6 +699,7 @@ if "summary" in st.session_state:
     details = st.session_state.get("details", pd.DataFrame())
     auth_rows = st.session_state.get("auth_rows", pd.DataFrame())
     invalid = st.session_state.get("invalid_rows", pd.DataFrame())
+    preview_rows = int(st.session_state.get("preview_rows", 500))
     discovery = st.session_state.get("discovery_stats", {})
     deep = st.session_state.get("deep_stats", {})
     notice = st.session_state.pop("deep_notice", None)
@@ -475,7 +725,10 @@ if "summary" in st.session_state:
     )
     if total - located and not fallback_all:
         st.warning("Enable fallback search and run discovery again only for IPs not located from candidate metadata.")
-    st.dataframe(summary, use_container_width=True, height=420)
+    summary_preview = preview_dataframe(summary, preview_rows)
+    if len(summary_preview) < len(summary):
+        st.caption(f"Showing first {len(summary_preview)} of {len(summary)} summary rows. Use the downloads for the full result set.")
+    st.dataframe(summary_preview, use_container_width=True, height=420)
 
     st.subheader("Deep Validate Selected Results")
     selection = latest_rows(details)
@@ -538,9 +791,18 @@ if "summary" in st.session_state:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     with st.expander("All folder/scan and deep-validation matches"):
-        st.dataframe(details, use_container_width=True, height=360)
+        details_preview = preview_dataframe(details, preview_rows)
+        if len(details_preview) < len(details):
+            st.caption(f"Showing first {len(details_preview)} of {len(details)} match rows.")
+        st.dataframe(details_preview, use_container_width=True, height=360)
     with st.expander("Authentication evidence rows"):
-        st.dataframe(auth_rows, use_container_width=True, height=360)
+        auth_preview = preview_dataframe(auth_rows, preview_rows)
+        if len(auth_preview) < len(auth_rows):
+            st.caption(f"Showing first {len(auth_preview)} of {len(auth_rows)} authentication evidence rows.")
+        st.dataframe(auth_preview, use_container_width=True, height=360)
     if not invalid.empty:
         with st.expander("Invalid input rows"):
-            st.dataframe(invalid, use_container_width=True)
+            invalid_preview = preview_dataframe(invalid, preview_rows)
+            if len(invalid_preview) < len(invalid):
+                st.caption(f"Showing first {len(invalid_preview)} of {len(invalid)} invalid rows.")
+            st.dataframe(invalid_preview, use_container_width=True)
