@@ -58,13 +58,7 @@ sample_ips.csv       Sample upload file
 tests/test_ip_utils.py
 ```
 
-## Preserved Previous Version
 
-The earlier full-featured build was preserved before this reset:
-
-```text
-C:\Users\gsaru\Github-ArupSEK\nessus-ip-folder-validator-backup-2026-07-30
-```
 
 That backup remains available if you need to reference or recover the older implementation.
 
