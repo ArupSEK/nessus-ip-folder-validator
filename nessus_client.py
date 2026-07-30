@@ -22,7 +22,7 @@ class NessusAPIError(RuntimeError):
 @dataclass
 class ScanRecord:
     scan_id: str
-    schedule_uuid: str
+    scan_uuid: str
     name: str
     folder_id: str
     folder_name: str
@@ -220,7 +220,7 @@ def make_scan_records(scans: list[dict[str, Any]], folder_map: dict[str, str]) -
         folder_id = str(scan.get("folder_id", scan.get("folder", "")))
         records.append(ScanRecord(
             scan_id=scan_id,
-            schedule_uuid=str(scan.get("schedule_uuid", scan.get("uuid", scan_id))),
+            scan_uuid=str(scan.get("uuid", scan.get("schedule_uuid", ""))),
             name=str(scan.get("name", scan.get("scan_name", f"Scan {scan_id}"))),
             folder_id=folder_id,
             folder_name=folder_map.get(folder_id, f"Folder {folder_id}" if folder_id else "Unknown Folder"),
@@ -284,7 +284,7 @@ def build_index_fast_api(
         histories = []
         if include_history:
             try:
-                histories = client.scan_history(scan.schedule_uuid or scan.scan_id)
+                histories = client.scan_history(scan.scan_id)
             except Exception:
                 histories = []
         if not histories:
@@ -293,7 +293,7 @@ def build_index_fast_api(
             history_id = hist.get("id") or hist.get("history_id")
             history_uuid = hist.get("uuid") or hist.get("scan_uuid")
             try:
-                detail = client.scan_details(scan.schedule_uuid or scan.scan_id, str(history_id) if history_id else None, str(history_uuid) if history_uuid else None)
+                detail = client.scan_details(scan.scan_id, str(history_id) if history_id else None, str(history_uuid) if history_uuid else None)
             except Exception as exc:
                 matches.append({
                     "normalized_ip": "",
@@ -314,7 +314,7 @@ def build_index_fast_api(
                 host_detail = None
                 if fetch_host_details and host_id:
                     try:
-                        host_detail = client.host_details(scan.schedule_uuid or scan.scan_id, host_id, str(history_id) if history_id else None)
+                        host_detail = client.host_details(scan.scan_uuid or scan.scan_id, host_id, str(history_id) if history_id else None)
                         # Try to improve IP from info/host properties.
                         for container in (host_detail.get("info", {}), host_detail.get("host", {}), host_detail):
                             if isinstance(container, dict):
@@ -387,7 +387,7 @@ def build_index_csv_export(
         histories = []
         if include_history:
             try:
-                histories = client.scan_history(scan.schedule_uuid or scan.scan_id)
+                histories = client.scan_history(scan.scan_id)
             except Exception:
                 histories = []
         if not histories:
@@ -395,7 +395,7 @@ def build_index_csv_export(
         for hist in histories:
             history_id = hist.get("id") or hist.get("history_id")
             try:
-                data = client.export_scan_csv(scan.schedule_uuid or scan.scan_id, str(history_id) if history_id else None)
+                data = client.export_scan_csv(scan.scan_id, str(history_id) if history_id else None)
                 df = _read_export_csv(data)
             except Exception as exc:
                 matches.append({
