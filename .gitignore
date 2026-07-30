@@ -1,29 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
 .venv/
-venv/
-env/
-
-# Streamlit / local secrets
-.streamlit/secrets.toml
-.nessus_ip_validator_auth.json
-*.nessus_ip_validator_auth.json
-
-# Reports and exports
+__pycache__/
+*.pyc
 *.xlsx
 *.csv
-!sample_ips.csv
-nessus_ip_validation_*.csv
-nessus_ip_validation_*.xlsx
-exports/
-output/
-
-# OS / editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+!.streamlit/
+!.streamlit/config.toml
+!.gitignore
+!.sample_ips.csv
