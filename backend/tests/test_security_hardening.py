@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.models.finding import FindingRecord
 from backend.app.models.scan import ScanRecord
+from backend.app.services.auth import utc_now
 
 
 def _seed_finding(db_session, *, finding_key: str) -> FindingRecord:
@@ -85,3 +86,25 @@ async def test_readonly_user_cannot_export_deleted_audit(client, admin_user, rea
         params={"report_type": "deleted_objects_audit", "export_format": "csv"},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_destructive_action_replay_is_rejected(client, admin_user, db_session) -> None:
+    scan = ScanRecord(
+        nessus_scan_id=str(uuid4()),
+        nessus_uuid=str(uuid4()),
+        name="replay-scan",
+        status="completed",
+        deleted_at=utc_now(),
+        permanently_deleted_at=utc_now(),
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    csrf = await _login(client, "admin", "StrongPass123!")
+    response = await client.post(
+        f"/api/v1/scans/{scan.id}/permanent-delete",
+        headers={"X-CSRF-Token": csrf},
+        json={"justification": "replay"},
+    )
+    assert response.status_code == 400

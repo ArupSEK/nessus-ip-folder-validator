@@ -6,11 +6,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from backend.app.models.asset import AssetRecord
+from backend.app.models.asset_review import AssetReviewRecord
 from backend.app.models.auth import AuditEvent
 from backend.app.models.finding import FindingRecord
 from backend.app.models.scan import ScanRecord
 from backend.app.models.workflow import FindingWorkflow, WorkflowDecision
 from backend.app.services.auth import utc_now
+from backend.app.services.workflow import queue_ambiguous_asset_reviews
 
 
 def _seed_finding(db_session, *, finding_key: str, severity: int = 4) -> FindingRecord:
@@ -150,3 +153,64 @@ async def test_workflow_audit_generation(client, admin_user, db_session) -> None
     actions = {row.action for row in db_session.scalars(select(AuditEvent).where(AuditEvent.object_name == finding.finding_key)).all()}
     assert "findings.workflow.update" in actions
     assert "false_positive.request" in actions
+
+
+@pytest.mark.anyio
+async def test_asset_review_queue_and_merge_split(client, admin_user, db_session) -> None:
+    scan = ScanRecord(
+        nessus_scan_id=str(uuid4()),
+        nessus_uuid=str(uuid4()),
+        name="asset-review-scan",
+        status="completed",
+    )
+    db_session.add(scan)
+    db_session.flush()
+    left = AssetRecord(
+        stable_asset_key="asset-a",
+        source_import_job_id=str(uuid4()),
+        source_scan_record_id=scan.id,
+        hostname="host-1",
+        ipv4_address="10.0.0.10",
+    )
+    right = AssetRecord(
+        stable_asset_key="asset-b",
+        source_import_job_id=str(uuid4()),
+        source_scan_record_id=scan.id,
+        hostname="host-1",
+        ipv4_address="10.0.0.10",
+    )
+    db_session.add_all([left, right])
+    db_session.flush()
+    queue_ambiguous_asset_reviews(db_session, [left, right])
+    db_session.commit()
+
+    csrf = await _login(client)
+    pending = await client.get("/api/v1/workflows/asset-reviews")
+    assert pending.status_code == 200
+    assert pending.json()["total"] >= 1
+    review_id = pending.json()["reviews"][0]["id"]
+
+    merge_response = await client.post(
+        f"/api/v1/workflows/asset-reviews/{review_id}/merge",
+        headers={"X-CSRF-Token": csrf},
+        json={"canonical_asset_key": "asset-a", "notes": "Same host after analyst review."},
+    )
+    assert merge_response.status_code == 200
+    assert merge_response.json()["status"] == "merged"
+
+    second_review = AssetReviewRecord(
+        left_asset_key="asset-c",
+        right_asset_key="asset-d",
+        match_basis="hostname",
+        status="pending",
+    )
+    db_session.add(second_review)
+    db_session.commit()
+
+    split_response = await client.post(
+        f"/api/v1/workflows/asset-reviews/{second_review.id}/split",
+        headers={"X-CSRF-Token": csrf},
+        json={"notes": "Different systems behind reused DNS."},
+    )
+    assert split_response.status_code == 200
+    assert split_response.json()["status"] == "split"

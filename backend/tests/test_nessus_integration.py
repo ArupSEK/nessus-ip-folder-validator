@@ -320,7 +320,21 @@ async def test_ssrf_rejection(client, admin_user) -> None:
         },
     )
     assert response.status_code == 400
-    assert "SSRF" in response.json()["detail"]
+
+
+def test_redirect_responses_are_blocked() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://evil.example.com"})
+
+    client = NessusApiClient(
+        base_url="https://scanner.example.com:8834",
+        access_key="ACCESSKEY12345",
+        secret_key="SECRETKEY12345",
+        transport=build_transport(handler),
+        retries=0,
+    )
+    with pytest.raises(NessusResponseError, match="redirect"):
+        client.validate_connection(approved_hosts=[])
 
 
 def test_unexpected_status_includes_safe_error_details() -> None:

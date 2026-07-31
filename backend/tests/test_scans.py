@@ -123,6 +123,8 @@ def build_scan_transport(state: ScanMockState):
             return httpx.Response(200, json={"scan": {"id": scan_id}})
         if path.startswith("/scans/") and method == "GET":
             scan_id = path.split("/")[2]
+            if scan_id not in state.scans:
+                return httpx.Response(404, json={})
             return httpx.Response(200, json=state.details(scan_id))
         if path.startswith("/scans/") and path.endswith("/copy") and method == "POST":
             source_id = path.split("/")[2]
@@ -137,6 +139,14 @@ def build_scan_transport(state: ScanMockState):
             scan_id = path.split("/")[2]
             state.scans[scan_id]["status"] = "running"
             return httpx.Response(200, json={"scan_uuid": state.scans[scan_id]["uuid"]})
+        if path.startswith("/scans/") and path.endswith("/pause") and method == "POST":
+            scan_id = path.split("/")[2]
+            state.scans[scan_id]["status"] = "paused"
+            return httpx.Response(200, json={"paused": True})
+        if path.startswith("/scans/") and path.endswith("/resume") and method == "POST":
+            scan_id = path.split("/")[2]
+            state.scans[scan_id]["status"] = "running"
+            return httpx.Response(200, json={"resumed": True})
         if path.startswith("/scans/") and path.endswith("/stop") and method == "POST":
             scan_id = path.split("/")[2]
             state.scans[scan_id]["status"] = "stopped"
@@ -450,6 +460,24 @@ async def test_scan_stop(app, client, admin_user) -> None:
 
 
 @pytest.mark.anyio
+async def test_scan_pause_and_resume(app, client, admin_user) -> None:
+    state = ScanMockState()
+    app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)
+    csrf_token = await login_admin(client)
+    await save_profile_and_refresh_folders(client, csrf_token)
+    await client.post("/api/v1/scans/refresh", headers={"X-CSRF-Token": csrf_token})
+    scans = await client.get("/api/v1/scans")
+    running_scan = next(item for item in scans.json()["scans"] if item["name"] == "Internet Edge")
+    pause_response = await client.post(f"/api/v1/scans/{running_scan['id']}/pause", headers={"X-CSRF-Token": csrf_token})
+    assert pause_response.status_code == 200
+    assert pause_response.json()["status"] == "paused"
+    resume_response = await client.post(f"/api/v1/scans/{running_scan['id']}/resume", headers={"X-CSRF-Token": csrf_token})
+    assert resume_response.status_code == 200
+    assert resume_response.json()["status"] == "running"
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
 async def test_running_scan_deletion_prevention(app, client, admin_user) -> None:
     state = ScanMockState()
     app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)
@@ -478,6 +506,51 @@ async def test_move_to_trash(app, client, admin_user, db_session) -> None:
     stored = db_session.get(ScanRecord, scan["id"])
     assert stored is not None
     assert stored.deleted_at is not None
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_restore_and_permanent_delete_flow(app, client, admin_user, db_session) -> None:
+    state = ScanMockState()
+    app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)
+    csrf_token = await login_admin(client)
+    await save_profile_and_refresh_folders(client, csrf_token)
+    await client.post("/api/v1/scans/refresh", headers={"X-CSRF-Token": csrf_token})
+    scans = await client.get("/api/v1/scans")
+    scan = next(item for item in scans.json()["scans"] if item["name"] == "Weekly Auth Scan")
+
+    trash_response = await client.post(f"/api/v1/scans/{scan['id']}/trash", headers={"X-CSRF-Token": csrf_token})
+    assert trash_response.status_code == 200
+
+    state.scans["10"] = {
+        "id": 10,
+        "uuid": "scan-10",
+        "name": "Weekly Auth Scan",
+        "folder_id": 8,
+        "status": "completed",
+        "owner": "admin",
+        "targets": "10.0.0.1,server.example.com",
+        "scanner_id": 5,
+        "schedule_type": "weekly",
+        "history": [],
+    }
+    restore_response = await client.post(f"/api/v1/scans/{scan['id']}/restore", headers={"X-CSRF-Token": csrf_token})
+    assert restore_response.status_code == 200
+    assert restore_response.json()["deleted_at"] is None
+
+    second_trash = await client.post(f"/api/v1/scans/{scan['id']}/trash", headers={"X-CSRF-Token": csrf_token})
+    assert second_trash.status_code == 200
+    state.scans.pop("10", None)
+    permanent_delete_response = await client.post(
+        f"/api/v1/scans/{scan['id']}/permanent-delete",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"justification": "Retention window closed."},
+    )
+    assert permanent_delete_response.status_code == 200
+    db_session.expire_all()
+    stored = db_session.get(ScanRecord, scan["id"])
+    assert stored is not None
+    assert stored.permanently_deleted_at is not None
     app.dependency_overrides.clear()
 
 

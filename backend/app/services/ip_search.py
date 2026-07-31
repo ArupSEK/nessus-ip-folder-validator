@@ -15,6 +15,7 @@ from backend.app.services.auth import ensure_utc
 from ip_utils import normalize_ip
 
 CIDR_EXPANSION_LIMIT = 256
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
 class IpSearchError(ValueError):
@@ -33,12 +34,16 @@ def _collect_text_cells(text: str) -> list[str]:
 
 
 def parse_uploaded_entries(filename: str, payload: bytes) -> list[str]:
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise IpSearchError("Uploaded file exceeds the current size limit.")
     suffix = Path(filename).suffix.lower()
     if suffix == ".txt":
         return [line.strip() for line in payload.decode("utf-8", errors="ignore").splitlines() if line.strip()]
     if suffix == ".csv":
         return _collect_text_cells(payload.decode("utf-8", errors="ignore"))
     if suffix == ".xlsx":
+        if not payload.startswith(b"PK"):
+            raise IpSearchError("Uploaded .xlsx file is not a valid Excel workbook.")
         workbook = load_workbook(BytesIO(payload), read_only=True, data_only=True)
         values: list[str] = []
         for sheet in workbook.worksheets:

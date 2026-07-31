@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from backend.app.models.auth import AuditEvent
 from backend.app.models.finding import FindingRecord
 from backend.app.models.import_job import ImportJob
 from backend.app.models.scan import ScanRecord
+from backend.app.models.workflow import FindingWorkflow, WorkflowDecision
 
 
 def _seed_job(db_session, *, scan_name: str, template_uuid: str, status_meta: dict[str, str] | None = None):
@@ -115,3 +117,89 @@ async def test_report_export_permissions_and_formula_safety(client, admin_user, 
     sheet = workbook.active
     values = [cell for row in sheet.iter_rows(values_only=True) for cell in row if isinstance(cell, str)]
     assert "'=DELETE-ME" in values
+
+
+@pytest.mark.anyio
+async def test_global_ip_search_and_workflow_reports(client, admin_user, db_session) -> None:
+    scan, job, asset = _seed_job(
+        db_session,
+        scan_name="Ops",
+        template_uuid="tmpl-b",
+        status_meta={"reachability_status": "reachable", "authentication_status": "successful", "credentialed_checks_status": "passed"},
+    )
+    scan.targets_text = "10.0.0.1"
+    scan.target_count = 1
+    workflow = FindingWorkflow(
+        finding_key="ops-asset:1001:443:tcp",
+        asset_key="ops-asset",
+        workflow_status="Assigned",
+        owner="alice",
+        remediation_team="blue",
+        due_date=(datetime.now(timezone.utc).date() - timedelta(days=2)),
+        days_overdue=2,
+    )
+    decision = WorkflowDecision(
+        finding_workflow_id=workflow.id,
+        decision_type="risk_acceptance",
+        reason="Legacy dependency",
+        business_justification="Accepted by owner",
+        status="approved",
+        approved_at=datetime.now(timezone.utc),
+    )
+    exception = WorkflowDecision(
+        finding_workflow_id=workflow.id,
+        decision_type="exception",
+        reason="Temporary exception",
+        status="approved",
+        expiry_date=(datetime.now(timezone.utc).date() + timedelta(days=5)),
+        approved_at=datetime.now(timezone.utc),
+    )
+    db_session.add(workflow)
+    db_session.flush()
+    decision.finding_workflow_id = workflow.id
+    exception.finding_workflow_id = workflow.id
+    db_session.add_all([decision, exception])
+    db_session.commit()
+
+    csrf = await _login(client, "admin", "StrongPass123!")
+
+    ip_export = await client.get(
+        "/api/v1/reports/export",
+        params={"report_type": "global_ip_search", "export_format": "csv", "entries": "10.0.0.1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert ip_export.status_code == 200
+    assert "10.0.0.1" in ip_export.text
+    assert "Ops" in ip_export.text
+
+    auth_export = await client.get(
+        "/api/v1/reports/export",
+        params={"report_type": "scan_authentication_status", "export_format": "csv"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert auth_export.status_code == 200
+    assert "successful" in auth_export.text
+
+    overdue_export = await client.get(
+        "/api/v1/reports/export",
+        params={"report_type": "sla_overdue", "export_format": "csv"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert overdue_export.status_code == 200
+    assert "alice" in overdue_export.text
+
+    risk_export = await client.get(
+        "/api/v1/reports/export",
+        params={"report_type": "risk_acceptance", "export_format": "csv"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert risk_export.status_code == 200
+    assert "Legacy dependency" in risk_export.text
+
+    exception_export = await client.get(
+        "/api/v1/reports/export",
+        params={"report_type": "expiring_exceptions", "export_format": "csv", "days_until_expiry": 7},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert exception_export.status_code == 200
+    assert "Temporary exception" in exception_export.text

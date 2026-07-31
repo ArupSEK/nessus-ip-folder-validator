@@ -24,6 +24,9 @@ class ScanResponse(BaseModel):
     last_completion_at: str | None = None
     last_synchronized_at: str | None = None
     deleted_at: str | None = None
+    permanently_deleted_at: str | None = None
+    is_restorable: bool = False
+    is_permanently_deleted: bool = False
 
 
 class ScanListResponse(BaseModel):
@@ -110,4 +113,8 @@ class ScanMoveRequest(BaseModel):
 
 
 class ScanHistoryDeleteRequest(BaseModel):
+    justification: str = Field(default="", max_length=500)
+
+
+class ScanPermanentDeleteRequest(BaseModel):
     justification: str = Field(default="", max_length=500)

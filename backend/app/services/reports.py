@@ -3,20 +3,24 @@ from __future__ import annotations
 import csv
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.models.asset import AssetRecord
 from backend.app.models.auth import AuditEvent, UserSession
 from backend.app.models.comparison import ComparisonResultRecord, ComparisonRun
 from backend.app.models.finding import FindingRecord
 from backend.app.models.folder import FolderRecord
 from backend.app.models.import_job import ImportJob
 from backend.app.models.scan import ScanRecord
+from backend.app.models.workflow import FindingWorkflow, WorkflowDecision
 from backend.app.services.audit import write_audit
 from backend.app.services.dashboard import _effective_finding
+from backend.app.services.ip_search import run_ip_search
+from backend.app.services.workflow import OPEN_WORKFLOW_STATUSES
 
 
 class ReportServiceError(ValueError):
@@ -34,7 +38,164 @@ def _safe_cell(value: object) -> str:
     return text
 
 
-def _rows_for_report(db: Session, *, report_type: str, comparison_run_id: str | None = None) -> tuple[list[str], list[dict[str, object]]]:
+def _load_metadata(asset: AssetRecord) -> dict[str, str]:
+    if not asset.raw_metadata:
+        return {}
+    try:
+        payload = json.loads(asset.raw_metadata)
+    except json.JSONDecodeError:
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def _rows_for_workflow_overdue(db: Session) -> tuple[list[str], list[dict[str, object]]]:
+    today = datetime.now(timezone.utc).date()
+    rows = db.scalars(select(FindingWorkflow).order_by(FindingWorkflow.days_overdue.desc(), FindingWorkflow.finding_key)).all()
+    output = []
+    for row in rows:
+        if row.due_date is None or row.actual_remediation_date is not None:
+            continue
+        if row.workflow_status not in OPEN_WORKFLOW_STATUSES:
+            continue
+        if row.due_date >= today:
+            continue
+        output.append(
+            {
+                "finding_key": row.finding_key,
+                "asset_key": row.asset_key,
+                "workflow_status": row.workflow_status,
+                "owner": row.owner,
+                "remediation_team": row.remediation_team,
+                "due_date": row.due_date.isoformat(),
+                "days_overdue": row.days_overdue,
+                "ticket_number": row.ticket_number,
+                "validation_status": row.validation_status,
+            }
+        )
+    return (
+        ["finding_key", "asset_key", "workflow_status", "owner", "remediation_team", "due_date", "days_overdue", "ticket_number", "validation_status"],
+        output,
+    )
+
+
+def _rows_for_decisions(db: Session, *, decision_type: str, days_until_expiry: int) -> tuple[list[str], list[dict[str, object]]]:
+    query = (
+        select(WorkflowDecision, FindingWorkflow)
+        .join(FindingWorkflow, FindingWorkflow.id == WorkflowDecision.finding_workflow_id)
+        .where(WorkflowDecision.decision_type == decision_type, WorkflowDecision.status == "approved")
+        .order_by(WorkflowDecision.expiry_date.asc(), WorkflowDecision.approved_at.desc())
+    )
+    rows = db.execute(query).all()
+    today = datetime.now(timezone.utc).date()
+    output: list[dict[str, object]] = []
+    for decision, workflow in rows:
+        if decision_type == "exception":
+            if decision.expiry_date is None:
+                continue
+            if decision.expiry_date > today + timedelta(days=max(days_until_expiry, 0)):
+                continue
+        output.append(
+            {
+                "finding_key": workflow.finding_key,
+                "asset_key": workflow.asset_key,
+                "workflow_status": workflow.workflow_status,
+                "status": decision.status,
+                "reason": decision.reason,
+                "business_justification": decision.business_justification,
+                "compensating_controls": decision.compensating_controls,
+                "review_date": decision.review_date.isoformat() if decision.review_date else "",
+                "expiry_date": decision.expiry_date.isoformat() if decision.expiry_date else "",
+                "approved_at": decision.approved_at.isoformat() if decision.approved_at else "",
+            }
+        )
+    return (
+        ["finding_key", "asset_key", "workflow_status", "status", "reason", "business_justification", "compensating_controls", "review_date", "expiry_date", "approved_at"],
+        output,
+    )
+
+
+def _rows_for_scan_authentication_status(db: Session) -> tuple[list[str], list[dict[str, object]]]:
+    latest_jobs = db.scalars(select(ImportJob).where(ImportJob.status == "completed").order_by(ImportJob.created_at.desc())).all()
+    by_scan: dict[str, ImportJob] = {}
+    for job in latest_jobs:
+        by_scan.setdefault(job.scan_record_id, job)
+    output: list[dict[str, object]] = []
+    for job in by_scan.values():
+        scan = db.get(ScanRecord, job.scan_record_id)
+        if scan is None:
+            continue
+        assets = db.scalars(select(AssetRecord).where(AssetRecord.source_import_job_id == job.id).order_by(AssetRecord.hostname, AssetRecord.ipv4_address)).all()
+        for asset in assets:
+            meta = _load_metadata(asset)
+            output.append(
+                {
+                    "scan_name": scan.name,
+                    "scan_id": scan.nessus_scan_id,
+                    "asset_key": asset.stable_asset_key,
+                    "hostname": asset.hostname,
+                    "ipv4_address": asset.ipv4_address,
+                    "reachability": meta.get("reachability_status", "unknown"),
+                    "authentication_status": meta.get("authentication_status", "unknown"),
+                    "credentialed_checks_status": meta.get("credentialed_checks_status", "unknown"),
+                    "source_import_job_id": job.id,
+                }
+            )
+    return (
+        ["scan_name", "scan_id", "asset_key", "hostname", "ipv4_address", "reachability", "authentication_status", "credentialed_checks_status", "source_import_job_id"],
+        output,
+    )
+
+
+def _rows_for_global_ip_search(db: Session, *, entries: list[str], expand_cidr: bool) -> tuple[list[str], list[dict[str, object]]]:
+    if not entries:
+        raise ReportServiceError("Global IP Search export requires at least one query entry.")
+    result = run_ip_search(db, entries, expand_cidr=expand_cidr)
+    output: list[dict[str, object]] = []
+    for item in result.results:
+        if not item.matches:
+            output.append(
+                {
+                    "query": item.query,
+                    "normalized_ip": item.normalized_ip or "",
+                    "folder_name": "",
+                    "scan_name": "",
+                    "scan_status": "",
+                    "reachability": "",
+                    "authentication_status": "",
+                    "credentialed_checks_status": "",
+                    "last_scan_date": "",
+                }
+            )
+            continue
+        for match in item.matches:
+            output.append(
+                {
+                    "query": match.query,
+                    "normalized_ip": match.normalized_ip,
+                    "folder_name": match.folder_name,
+                    "scan_name": match.scan_name,
+                    "scan_status": match.scan_status,
+                    "reachability": match.reachability,
+                    "authentication_status": match.authentication_status,
+                    "credentialed_checks_status": match.credentialed_checks_status,
+                    "last_scan_date": match.last_scan_date or "",
+                }
+            )
+    return (
+        ["query", "normalized_ip", "folder_name", "scan_name", "scan_status", "reachability", "authentication_status", "credentialed_checks_status", "last_scan_date"],
+        output,
+    )
+
+
+def _rows_for_report(
+    db: Session,
+    *,
+    report_type: str,
+    comparison_run_id: str | None = None,
+    ip_search_entries: list[str] | None = None,
+    expand_cidr: bool = False,
+    days_until_expiry: int = 30,
+) -> tuple[list[str], list[dict[str, object]]]:
     normalized = report_type.strip().lower()
     if normalized == "folder_inventory":
         rows = db.scalars(select(FolderRecord).order_by(FolderRecord.name)).all()
@@ -55,7 +216,7 @@ def _rows_for_report(db: Session, *, report_type: str, comparison_run_id: str | 
     if normalized == "scan_inventory":
         rows = db.scalars(select(ScanRecord).order_by(ScanRecord.name)).all()
         return (
-            ["scan_name", "status", "folder_name", "target_count", "owner", "permission_status", "deleted"],
+            ["scan_name", "status", "folder_name", "target_count", "owner", "permission_status", "deleted", "permanently_deleted"],
             [
                 {
                     "scan_name": row.name,
@@ -65,6 +226,7 @@ def _rows_for_report(db: Session, *, report_type: str, comparison_run_id: str | 
                     "owner": row.owner,
                     "permission_status": row.permission_status,
                     "deleted": "yes" if row.deleted_at else "no",
+                    "permanently_deleted": "yes" if row.permanently_deleted_at else "no",
                 }
                 for row in rows
             ],
@@ -135,6 +297,16 @@ def _rows_for_report(db: Session, *, report_type: str, comparison_run_id: str | 
                 for row in rows
             ],
         )
+    if normalized == "global_ip_search":
+        return _rows_for_global_ip_search(db, entries=ip_search_entries or [], expand_cidr=expand_cidr)
+    if normalized == "scan_authentication_status":
+        return _rows_for_scan_authentication_status(db)
+    if normalized == "sla_overdue":
+        return _rows_for_workflow_overdue(db)
+    if normalized == "risk_acceptance":
+        return _rows_for_decisions(db, decision_type="risk_acceptance", days_until_expiry=days_until_expiry)
+    if normalized == "expiring_exceptions":
+        return _rows_for_decisions(db, decision_type="exception", days_until_expiry=days_until_expiry)
     if normalized == "deleted_objects_audit":
         rows = db.scalars(
             select(AuditEvent)
@@ -188,8 +360,18 @@ def build_report_bytes(
     export_format: str,
     comparison_run_id: str | None,
     source_ip: str,
+    ip_search_entries: list[str] | None = None,
+    expand_cidr: bool = False,
+    days_until_expiry: int = 30,
 ) -> tuple[str, str, bytes]:
-    headers, rows = _rows_for_report(db, report_type=report_type, comparison_run_id=comparison_run_id)
+    headers, rows = _rows_for_report(
+        db,
+        report_type=report_type,
+        comparison_run_id=comparison_run_id,
+        ip_search_entries=ip_search_entries,
+        expand_cidr=expand_cidr,
+        days_until_expiry=days_until_expiry,
+    )
     normalized_format = export_format.strip().lower()
     if normalized_format == "csv":
         buffer = io.StringIO()
@@ -223,7 +405,12 @@ def build_report_bytes(
         object_id=report_type,
         object_name=report_type,
         source_ip=source_ip,
-        new_state={"format": normalized_format, "comparison_run_id": comparison_run_id or ""},
+        new_state={
+            "format": normalized_format,
+            "comparison_run_id": comparison_run_id or "",
+            "ip_search_entry_count": len(ip_search_entries or []),
+            "days_until_expiry": days_until_expiry,
+        },
     )
     db.commit()
     return f"{report_type}_{_utc_stamp()}.{extension}", content_type, payload

@@ -13,14 +13,15 @@ from backend.app.models.auth import UserSession
 from backend.app.models.folder import FolderRecord
 from backend.app.models.scan import ScanHistoryRecord, ScanRecord
 from backend.app.schemas.scan import (
+    PolicyListResponse,
+    PolicyResponse,
     ScanCloneRequest,
     ScanCreateRequest,
     ScanHistoryDeleteRequest,
     ScanHistoryListResponse,
-    PolicyListResponse,
-    PolicyResponse,
     ScanHistoryResponse,
     ScanMoveRequest,
+    ScanPermanentDeleteRequest,
     ScanResponse,
     ScanUpdateRequest,
     ScannerListResponse,
@@ -36,6 +37,8 @@ HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9-]{1,63}\.)*[A-Z
 VALID_SCHEDULES = {"on_demand", "once", "daily", "weekly", "monthly"}
 RUNNING_STATUSES = {"running", "queued", "pending", "resuming", "pausing"}
 STOPPABLE_STATUSES = {"running", "queued", "pending", "resuming"}
+PAUSABLE_STATUSES = {"running"}
+RESUMABLE_STATUSES = {"paused"}
 NESSUS_SCAN_ROLE_ALLOWLIST = {"BASIC", "SCAN_MANAGER", "SYSTEM_ADMINISTRATOR"}
 
 
@@ -43,7 +46,7 @@ class ScanServiceError(ValueError):
     pass
 
 
-SCAN_API_DISABLED_MESSAGE = "The connected Nessus scanner license reports scan_api=false, so scan create, clone, launch, stop, move and delete actions are unavailable on this scanner."
+SCAN_API_DISABLED_MESSAGE = "The connected Nessus scanner license reports scan_api=false, so scan create, clone, launch, pause, resume, stop, move and delete actions are unavailable on this scanner."
 
 
 def _normalize_name(value: str) -> str:
@@ -109,6 +112,8 @@ def _from_unix_or_iso(value: Any) -> datetime | None:
 
 
 def _scan_to_response(scan: ScanRecord) -> ScanResponse:
+    deleted_at = ensure_utc(scan.deleted_at)
+    permanently_deleted_at = ensure_utc(scan.permanently_deleted_at)
     return ScanResponse(
         id=scan.id,
         nessus_scan_id=scan.nessus_scan_id,
@@ -129,7 +134,10 @@ def _scan_to_response(scan: ScanRecord) -> ScanResponse:
         last_launch_at=ensure_utc(scan.last_launch_at).isoformat() if ensure_utc(scan.last_launch_at) else None,
         last_completion_at=ensure_utc(scan.last_completion_at).isoformat() if ensure_utc(scan.last_completion_at) else None,
         last_synchronized_at=ensure_utc(scan.last_synchronized_at).isoformat() if ensure_utc(scan.last_synchronized_at) else None,
-        deleted_at=ensure_utc(scan.deleted_at).isoformat() if ensure_utc(scan.deleted_at) else None,
+        deleted_at=deleted_at.isoformat() if deleted_at else None,
+        permanently_deleted_at=permanently_deleted_at.isoformat() if permanently_deleted_at else None,
+        is_restorable=bool(deleted_at and permanently_deleted_at is None),
+        is_permanently_deleted=permanently_deleted_at is not None,
     )
 
 
@@ -198,6 +206,7 @@ def _upsert_scan(db: Session, payload: dict[str, Any]) -> ScanRecord:
     existing.last_completion_at = _from_unix_or_iso(info.get("completed_at") or info.get("readable_last_modification_date")) or existing.last_completion_at
     existing.last_synchronized_at = utc_now()
     existing.deleted_at = None
+    existing.permanently_deleted_at = None
     return existing
 
 
@@ -548,6 +557,58 @@ def launch_scan(db: Session, *, actor_session: UserSession, scan_record_id: str,
     return _scan_to_response(scan)
 
 
+def pause_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, source_ip: str, client_factory: NessusClientFactory) -> ScanResponse:
+    scan = db.get(ScanRecord, scan_record_id)
+    if scan is None or scan.deleted_at is not None:
+        raise ScanServiceError("Scan not found.")
+    if scan.status not in PAUSABLE_STATUSES:
+        raise ScanServiceError("Only running scans can be paused.")
+    config, client = build_saved_nessus_client(db, client_factory=client_factory)
+    ensure_nessus_role_access(config, NESSUS_SCAN_ROLE_ALLOWLIST)
+    _require_scan_api(config)
+    client.pause_scan(scan.nessus_scan_id)
+    scan.status = "paused"
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="scans.pause",
+        object_type="scan",
+        object_id=scan.nessus_scan_id,
+        object_name=scan.name,
+        source_ip=source_ip,
+        new_state={"status": "paused"},
+    )
+    db.commit()
+    db.refresh(scan)
+    return _scan_to_response(scan)
+
+
+def resume_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, source_ip: str, client_factory: NessusClientFactory) -> ScanResponse:
+    scan = db.get(ScanRecord, scan_record_id)
+    if scan is None or scan.deleted_at is not None:
+        raise ScanServiceError("Scan not found.")
+    if scan.status not in RESUMABLE_STATUSES:
+        raise ScanServiceError("Only paused scans can be resumed.")
+    config, client = build_saved_nessus_client(db, client_factory=client_factory)
+    ensure_nessus_role_access(config, NESSUS_SCAN_ROLE_ALLOWLIST)
+    _require_scan_api(config)
+    client.resume_scan(scan.nessus_scan_id)
+    scan.status = "running"
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="scans.resume",
+        object_type="scan",
+        object_id=scan.nessus_scan_id,
+        object_name=scan.name,
+        source_ip=source_ip,
+        new_state={"status": "running"},
+    )
+    db.commit()
+    db.refresh(scan)
+    return _scan_to_response(scan)
+
+
 def stop_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, source_ip: str, client_factory: NessusClientFactory) -> ScanResponse:
     scan = db.get(ScanRecord, scan_record_id)
     if scan is None or scan.deleted_at is not None:
@@ -578,11 +639,12 @@ def trash_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, 
     scan = db.get(ScanRecord, scan_record_id)
     if scan is None or scan.deleted_at is not None:
         raise ScanServiceError("Scan not found.")
-    if scan.status in RUNNING_STATUSES:
-        raise ScanServiceError("Running scans cannot be moved to Trash.")
+    if scan.status in RUNNING_STATUSES or scan.status == "paused":
+        raise ScanServiceError("Running or paused scans cannot be moved to Trash.")
     config, client = build_saved_nessus_client(db, client_factory=client_factory)
     ensure_nessus_role_access(config, NESSUS_SCAN_ROLE_ALLOWLIST)
     _require_scan_api(config)
+    previous_status = scan.status
     client.delete_scan(scan.nessus_scan_id)
     scan.deleted_at = utc_now()
     scan.last_synchronized_at = utc_now()
@@ -594,8 +656,77 @@ def trash_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, 
         object_id=scan.nessus_scan_id,
         object_name=scan.name,
         source_ip=source_ip,
-        previous_state={"status": scan.status},
+        previous_state={"status": previous_status},
         new_state={"deleted": True},
+    )
+    db.commit()
+
+
+def restore_scan(db: Session, *, actor_session: UserSession, scan_record_id: str, source_ip: str, client_factory: NessusClientFactory) -> ScanResponse:
+    scan = db.get(ScanRecord, scan_record_id)
+    if scan is None:
+        raise ScanServiceError("Scan not found.")
+    if scan.permanently_deleted_at is not None:
+        raise ScanServiceError("Permanently deleted scans cannot be restored.")
+    if scan.deleted_at is None:
+        raise ScanServiceError("Scan is not currently in Trash.")
+    config, client = build_saved_nessus_client(db, client_factory=client_factory)
+    ensure_nessus_role_access(config, NESSUS_SCAN_ROLE_ALLOWLIST)
+    if not client.scan_exists(scan.nessus_scan_id):
+        raise ScanServiceError("The scan is no longer available in Nessus and cannot be restored.")
+    previous_state = {"deleted": True, "status": scan.status}
+    details = client.get_scan_details(scan.nessus_scan_id)
+    details["template_uuid"] = scan.template_uuid
+    scan = _upsert_scan(db, details)
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="scans.restore",
+        object_type="scan",
+        object_id=scan.nessus_scan_id,
+        object_name=scan.name,
+        source_ip=source_ip,
+        previous_state=previous_state,
+        new_state={"deleted": False, "status": scan.status},
+    )
+    db.commit()
+    db.refresh(scan)
+    return _scan_to_response(scan)
+
+
+def permanent_delete_scan(
+    db: Session,
+    *,
+    actor_session: UserSession,
+    scan_record_id: str,
+    payload: ScanPermanentDeleteRequest,
+    source_ip: str,
+    client_factory: NessusClientFactory,
+) -> None:
+    scan = db.get(ScanRecord, scan_record_id)
+    if scan is None:
+        raise ScanServiceError("Scan not found.")
+    if scan.deleted_at is None:
+        raise ScanServiceError("Move the scan to Trash before permanent delete.")
+    if scan.permanently_deleted_at is not None:
+        raise ScanServiceError("Scan is already permanently deleted.")
+    config, client = build_saved_nessus_client(db, client_factory=client_factory)
+    ensure_nessus_role_access(config, NESSUS_SCAN_ROLE_ALLOWLIST)
+    if client.scan_exists(scan.nessus_scan_id):
+        raise ScanServiceError("The scan still exists in Nessus. Restore or refresh it before permanent delete.")
+    scan.permanently_deleted_at = utc_now()
+    scan.last_synchronized_at = utc_now()
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="scans.permanent_delete",
+        object_type="scan",
+        object_id=scan.nessus_scan_id,
+        object_name=scan.name,
+        source_ip=source_ip,
+        justification=payload.justification,
+        previous_state={"deleted": True, "status": scan.status},
+        new_state={"permanently_deleted": True},
     )
     db.commit()
 

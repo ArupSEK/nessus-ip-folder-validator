@@ -18,6 +18,7 @@ from backend.app.schemas.imports import AssetResponse, FindingResponse, ImportJo
 from backend.app.services.audit import write_audit
 from backend.app.services.auth import ensure_utc, utc_now
 from backend.app.services.nessus import NessusConfigError, build_saved_nessus_client, ensure_nessus_role_access
+from backend.app.services.workflow import queue_ambiguous_asset_reviews, resolve_asset_key
 
 NESSUS_IMPORT_ROLE_ALLOWLIST = {"SCAN_MANAGER", "SYSTEM_ADMINISTRATOR"}
 
@@ -94,6 +95,15 @@ def _derive_asset_key(properties: dict[str, str], report_host_name: str) -> str:
 
 def _derive_finding_key(asset_key: str, plugin_id: int, port: int, protocol: str) -> str:
     return f"{asset_key}:{plugin_id}:{port}:{protocol.lower()}"
+
+
+def _apply_asset_key_overrides(db: Session, asset_rows: list[dict], finding_rows: list[dict]) -> None:
+    for asset in asset_rows:
+        asset["stable_asset_key"] = resolve_asset_key(db, asset["stable_asset_key"])
+    for finding in finding_rows:
+        asset_key = resolve_asset_key(db, finding["stable_asset_key"])
+        finding["stable_asset_key"] = asset_key
+        finding["finding_key"] = _derive_finding_key(asset_key, finding["plugin_id"], finding["port"], finding["protocol"])
 
 
 def _text_or_empty(node: ET.Element | None) -> str:
@@ -255,6 +265,7 @@ def run_import_job(
         db.flush()
 
         asset_rows, finding_rows = _parse_nessus_export(export_payload)
+        _apply_asset_key_overrides(db, asset_rows, finding_rows)
         db.execute(delete(FindingRecord).where(FindingRecord.source_import_job_id == job.id))
         db.execute(delete(AssetRecord).where(AssetRecord.source_import_job_id == job.id))
         assets_by_key: dict[str, AssetRecord] = {}
@@ -313,6 +324,7 @@ def run_import_job(
             findings_by_key[item["finding_key"]] = finding
         job.imported_asset_count = len(assets_by_key)
         job.imported_finding_count = len(findings_by_key)
+        queue_ambiguous_asset_reviews(db, list(assets_by_key.values()))
         job.progress_percent = 100
         job.status = "completed"
         job.last_checkpoint = "completed"

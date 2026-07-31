@@ -7,6 +7,10 @@ from backend.app.api.deps import get_source_ip, require_csrf, require_permission
 from backend.app.db.session import get_db
 from backend.app.models.workflow import WorkflowDecision
 from backend.app.schemas.workflow import (
+    AssetMergeRequest,
+    AssetReviewListResponse,
+    AssetReviewResponse,
+    AssetSplitRequest,
     FindingWorkflowResponse,
     FindingWorkflowUpdateRequest,
     WorkflowDecisionListResponse,
@@ -21,12 +25,66 @@ from backend.app.services.workflow import (
     approve_workflow_decision,
     expire_workflow_decisions,
     get_finding_workflow,
+    list_asset_reviews,
     list_workflow_decisions,
+    merge_asset_review,
     request_workflow_decision,
+    split_asset_review,
     update_finding_workflow,
 )
 
 router = APIRouter(tags=["workflow"])
+
+
+@router.get("/asset-reviews", response_model=AssetReviewListResponse)
+def list_asset_reviews_route(
+    status: str = "pending",
+    _: object = Depends(require_permissions("findings.view")),
+    db: Session = Depends(get_db),
+) -> AssetReviewListResponse:
+    return list_asset_reviews(db, status=status)
+
+
+@router.post("/asset-reviews/{review_id}/merge", response_model=AssetReviewResponse)
+def merge_asset_review_route(
+    review_id: str,
+    payload: AssetMergeRequest,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("findings.override")),
+    db: Session = Depends(get_db),
+) -> AssetReviewResponse:
+    try:
+        return merge_asset_review(
+            db,
+            actor_session=current_session,
+            review_id=review_id,
+            payload=payload,
+            source_ip=get_source_ip(request),
+        )
+    except WorkflowServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/asset-reviews/{review_id}/split", response_model=AssetReviewResponse)
+def split_asset_review_route(
+    review_id: str,
+    payload: AssetSplitRequest,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("findings.override")),
+    db: Session = Depends(get_db),
+) -> AssetReviewResponse:
+    try:
+        return split_asset_review(
+            db,
+            actor_session=current_session,
+            review_id=review_id,
+            payload=payload,
+            source_ip=get_source_ip(request),
+        )
+    except WorkflowServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/findings/{finding_key}", response_model=FindingWorkflowResponse)

@@ -156,6 +156,32 @@ type WorkflowDecisionList = {
   decisions: WorkflowDecision[];
 };
 
+type AssetReviewAssetSummary = {
+  stable_asset_key: string;
+  hostname: string;
+  fqdn: string;
+  ipv4_address: string;
+  ipv6_address: string;
+  tenable_asset_uuid: string;
+  agent_uuid: string;
+};
+
+type AssetReviewResponse = {
+  id: string;
+  left_asset: AssetReviewAssetSummary;
+  right_asset: AssetReviewAssetSummary;
+  match_basis: string[];
+  status: string;
+  canonical_asset_key: string;
+  notes: string;
+  resolved_at: string | null;
+};
+
+type AssetReviewListResponse = {
+  total: number;
+  reviews: AssetReviewResponse[];
+};
+
 type AuditEventResponse = {
   id: string;
   actor_username: string;
@@ -252,6 +278,9 @@ type ScanResponse = {
   last_completion_at: string | null;
   last_synchronized_at: string | null;
   deleted_at: string | null;
+  permanently_deleted_at: string | null;
+  is_restorable: boolean;
+  is_permanently_deleted: boolean;
 };
 
 type ScanListResponse = {
@@ -404,7 +433,21 @@ type ScanCloneDraft = {
   launch_now: boolean;
 };
 
+type AssetReviewDraft = {
+  canonical_asset_key: string;
+  notes: string;
+};
+
 type ActiveSection = "dashboard" | "findings" | "folders" | "scans" | "ip-search" | "audit" | "reports" | "settings";
+
+type ReportTypeOption = {
+  value: string;
+  label: string;
+  description: string;
+  comparisonScoped?: boolean;
+  requiresEntries?: boolean;
+  supportsDaysUntilExpiry?: boolean;
+};
 
 const sections: Array<{ id: ActiveSection; label: string; icon: React.ReactNode }> = [
   { id: "dashboard", label: "Overview", icon: <SpaceDashboardOutlinedIcon fontSize="small" /> },
@@ -461,17 +504,22 @@ const scanScheduleOptions = [
   { value: "monthly", label: "Monthly" }
 ];
 
-const reportTypes = [
-  { value: "scan_comparison", label: "Scan Comparison" },
-  { value: "new_findings", label: "New Findings" },
-  { value: "existing_findings", label: "Existing Findings" },
-  { value: "closed_findings", label: "Closed Findings" },
-  { value: "reopened_findings", label: "Reopened Findings" },
-  { value: "not_validated_findings", label: "Not Validated Findings" },
-  { value: "folder_inventory", label: "Folder Inventory" },
-  { value: "scan_inventory", label: "Scan Inventory" },
-  { value: "audit_events", label: "Audit Events" },
-  { value: "deleted_objects_audit", label: "Deleted Objects Audit" }
+const reportTypes: ReportTypeOption[] = [
+  { value: "scan_comparison", label: "Scan Comparison", description: "Lifecycle delta for the latest or selected comparison run.", comparisonScoped: true },
+  { value: "new_findings", label: "New Findings", description: "Findings introduced in the current comparison run.", comparisonScoped: true },
+  { value: "existing_findings", label: "Existing Findings", description: "Findings that remain open across runs.", comparisonScoped: true },
+  { value: "closed_findings", label: "Closed Findings", description: "Findings that disappeared in the latest comparison.", comparisonScoped: true },
+  { value: "reopened_findings", label: "Reopened Findings", description: "Findings that returned after previously closing.", comparisonScoped: true },
+  { value: "not_validated_findings", label: "Not Validated Findings", description: "Findings awaiting analyst validation.", comparisonScoped: true },
+  { value: "global_ip_search", label: "Global IP Search", description: "Export matches for manual IP or CIDR queries.", requiresEntries: true },
+  { value: "scan_authentication_status", label: "Scan Authentication Status", description: "Credentialed reachability and authentication outcomes from completed imports." },
+  { value: "sla_overdue", label: "SLA Overdue", description: "Open findings that are currently beyond SLA due date." },
+  { value: "risk_acceptance", label: "Risk Acceptance", description: "Approved risk acceptance decisions with workflow context." },
+  { value: "expiring_exceptions", label: "Expiring Exceptions", description: "Approved exceptions that expire within the selected window.", supportsDaysUntilExpiry: true },
+  { value: "folder_inventory", label: "Folder Inventory", description: "Current synchronized folder inventory." },
+  { value: "scan_inventory", label: "Scan Inventory", description: "Current synchronized scan inventory, including trash state." },
+  { value: "audit_events", label: "Audit Events", description: "Administrative and operational audit history." },
+  { value: "deleted_objects_audit", label: "Deleted Objects Audit", description: "Deletion and trash lifecycle audit trail." }
 ];
 
 const decisionTypeLabels: Record<string, string> = {
@@ -532,6 +580,13 @@ function emptyDecisionDraft(): DecisionDraft {
     expiry_date: "",
     review_date: "",
     evidence: ""
+  };
+}
+
+function emptyAssetReviewDraft(): AssetReviewDraft {
+  return {
+    canonical_asset_key: "",
+    notes: ""
   };
 }
 
@@ -689,6 +744,11 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
   const [severityFilter, setSeverityFilter] = React.useState("");
   const [search, setSearch] = React.useState("");
   const [selectedFinding, setSelectedFinding] = React.useState<DashboardFinding | null>(null);
+  const [assetReviews, setAssetReviews] = React.useState<AssetReviewResponse[]>([]);
+  const [assetReviewsLoading, setAssetReviewsLoading] = React.useState(false);
+  const [selectedAssetReviewId, setSelectedAssetReviewId] = React.useState("");
+  const [assetReviewDraft, setAssetReviewDraft] = React.useState<AssetReviewDraft>(emptyAssetReviewDraft());
+  const [assetReviewBusy, setAssetReviewBusy] = React.useState("");
   const [workflow, setWorkflow] = React.useState<WorkflowResponse | null>(null);
   const [workflowDraft, setWorkflowDraft] = React.useState<WorkflowDraft>(emptyWorkflowDraft());
   const [workflowLoading, setWorkflowLoading] = React.useState(false);
@@ -752,6 +812,9 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
   const [ipSearchResponse, setIpSearchResponse] = React.useState<IpSearchResponse | null>(null);
   const [reportType, setReportType] = React.useState("scan_comparison");
   const [reportFormat, setReportFormat] = React.useState("csv");
+  const [reportEntries, setReportEntries] = React.useState("");
+  const [reportExpandCidr, setReportExpandCidr] = React.useState(false);
+  const [reportDaysUntilExpiry, setReportDaysUntilExpiry] = React.useState("30");
   const [exportBusy, setExportBusy] = React.useState(false);
   const [banner, setBanner] = React.useState<{ tone: "success" | "error"; message: string } | null>(null);
   const isAdministrator = Boolean(session?.roles?.includes("Administrator"));
@@ -778,9 +841,19 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
     [scans, selectedScanId]
   );
 
+  const selectedAssetReview = React.useMemo(
+    () => assetReviews.find((item) => item.id === selectedAssetReviewId) || null,
+    [assetReviews, selectedAssetReviewId]
+  );
+
   const availableMasterTemplates = React.useMemo(
     () => scans.filter((item) => !item.deleted_at),
     [scans]
+  );
+
+  const selectedReport = React.useMemo(
+    () => reportTypes.find((item) => item.value === reportType) || reportTypes[0],
+    [reportType]
   );
 
   const scanApiUnavailable = React.useMemo(
@@ -849,6 +922,20 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
       setFindingsLoading(false);
     }
   }, [fetchJson, hasPermission, lifecycleFilter, search, selectedFinding?.finding_key, session, severityFilter, summary?.comparison_run_id]);
+
+  const refreshAssetReviews = React.useCallback(async () => {
+    if (!session || !hasPermission("findings.view")) return;
+    setAssetReviewsLoading(true);
+    try {
+      const payload = await fetchJson<AssetReviewListResponse>("/api/v1/workflows/asset-reviews?status=pending");
+      setAssetReviews(payload.reviews);
+    } catch (error) {
+      setAssetReviews([]);
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Asset review queue load failed." });
+    } finally {
+      setAssetReviewsLoading(false);
+    }
+  }, [fetchJson, hasPermission, session]);
 
   const refreshWorkflow = React.useCallback(
     async (findingKey: string) => {
@@ -1044,6 +1131,11 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
   }, [refreshFindings, session, summary]);
 
   React.useEffect(() => {
+    if (!session || activeSection !== "findings") return;
+    void refreshAssetReviews();
+  }, [activeSection, refreshAssetReviews, session]);
+
+  React.useEffect(() => {
     if (selectedFinding) {
       void refreshWorkflow(selectedFinding.finding_key);
     } else {
@@ -1106,6 +1198,28 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
       setSelectedScanId(scans[0].id);
     }
   }, [scans, selectedScanId]);
+
+  React.useEffect(() => {
+    if (assetReviews.length === 0) {
+      setSelectedAssetReviewId("");
+      setAssetReviewDraft(emptyAssetReviewDraft());
+      return;
+    }
+    if (!assetReviews.some((item) => item.id === selectedAssetReviewId)) {
+      setSelectedAssetReviewId(assetReviews[0].id);
+    }
+  }, [assetReviews, selectedAssetReviewId]);
+
+  React.useEffect(() => {
+    if (!selectedAssetReview) {
+      setAssetReviewDraft(emptyAssetReviewDraft());
+      return;
+    }
+    setAssetReviewDraft({
+      canonical_asset_key: selectedAssetReview.canonical_asset_key || selectedAssetReview.left_asset.stable_asset_key,
+      notes: selectedAssetReview.notes
+    });
+  }, [selectedAssetReview]);
 
   React.useEffect(() => {
     if (folders.length === 0) return;
@@ -1371,6 +1485,44 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
     }
   }
 
+  async function handleScanPause(): Promise<void> {
+    if (!selectedScan) return;
+    setScanActionBusy("pause");
+    try {
+      const payload = await fetchJson<ScanResponse>(
+        `/api/v1/scans/${encodeURIComponent(selectedScan.id)}/pause`,
+        { method: "POST" },
+        true
+      );
+      setSelectedScanId(payload.id);
+      await refreshScans();
+      setBanner({ tone: "success", message: "Scan paused." });
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Scan pause failed." });
+    } finally {
+      setScanActionBusy("");
+    }
+  }
+
+  async function handleScanResume(): Promise<void> {
+    if (!selectedScan) return;
+    setScanActionBusy("resume");
+    try {
+      const payload = await fetchJson<ScanResponse>(
+        `/api/v1/scans/${encodeURIComponent(selectedScan.id)}/resume`,
+        { method: "POST" },
+        true
+      );
+      setSelectedScanId(payload.id);
+      await refreshScans();
+      setBanner({ tone: "success", message: "Scan resumed." });
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Scan resume failed." });
+    } finally {
+      setScanActionBusy("");
+    }
+  }
+
   async function handleScanStop(): Promise<void> {
     if (!selectedScan) return;
     setScanActionBusy("stop");
@@ -1403,6 +1555,46 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
       setBanner({ tone: "success", message: "Scan moved to Trash." });
     } catch (error) {
       setBanner({ tone: "error", message: error instanceof Error ? error.message : "Scan delete failed." });
+    } finally {
+      setScanActionBusy("");
+    }
+  }
+
+  async function handleScanRestore(): Promise<void> {
+    if (!selectedScan) return;
+    setScanActionBusy("restore");
+    try {
+      const payload = await fetchJson<ScanResponse>(
+        `/api/v1/scans/${encodeURIComponent(selectedScan.id)}/restore`,
+        { method: "POST" },
+        true
+      );
+      setSelectedScanId(payload.id);
+      await refreshScans();
+      setBanner({ tone: "success", message: "Scan restored from Trash." });
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Scan restore failed." });
+    } finally {
+      setScanActionBusy("");
+    }
+  }
+
+  async function handleScanPermanentDelete(): Promise<void> {
+    if (!selectedScan) return;
+    setScanActionBusy("permanent-delete");
+    try {
+      await fetchJson<{ message: string }>(
+        `/api/v1/scans/${encodeURIComponent(selectedScan.id)}/permanent-delete`,
+        {
+          method: "POST",
+          body: JSON.stringify({ justification: "Confirmed from console after remote trash validation." })
+        },
+        true
+      );
+      await refreshScans();
+      setBanner({ tone: "success", message: "Scan permanently deleted." });
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Permanent delete failed." });
     } finally {
       setScanActionBusy("");
     }
@@ -1465,6 +1657,51 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
       setBanner({ tone: "error", message: error instanceof Error ? error.message : "IP upload failed." });
     } finally {
       setIpSearchUploadBusy(false);
+    }
+  }
+
+  async function handleAssetReviewMerge(canonicalAssetKey: string): Promise<void> {
+    if (!selectedAssetReview) return;
+    setAssetReviewBusy(`merge:${canonicalAssetKey}`);
+    try {
+      await fetchJson<AssetReviewResponse>(
+        `/api/v1/workflows/asset-reviews/${encodeURIComponent(selectedAssetReview.id)}/merge`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            canonical_asset_key: canonicalAssetKey,
+            notes: assetReviewDraft.notes
+          })
+        },
+        true
+      );
+      setBanner({ tone: "success", message: "Asset review merged." });
+      await refreshAssetReviews();
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Asset merge failed." });
+    } finally {
+      setAssetReviewBusy("");
+    }
+  }
+
+  async function handleAssetReviewSplit(): Promise<void> {
+    if (!selectedAssetReview) return;
+    setAssetReviewBusy("split");
+    try {
+      await fetchJson<AssetReviewResponse>(
+        `/api/v1/workflows/asset-reviews/${encodeURIComponent(selectedAssetReview.id)}/split`,
+        {
+          method: "POST",
+          body: JSON.stringify({ notes: assetReviewDraft.notes })
+        },
+        true
+      );
+      setBanner({ tone: "success", message: "Asset review marked as split." });
+      await refreshAssetReviews();
+    } catch (error) {
+      setBanner({ tone: "error", message: error instanceof Error ? error.message : "Asset split failed." });
+    } finally {
+      setAssetReviewBusy("");
     }
   }
 
@@ -1571,8 +1808,19 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
     setExportBusy(true);
     try {
       const params = new URLSearchParams({ report_type: reportType, export_format: reportFormat });
-      if (summary?.comparison_run_id) {
+      if (selectedReport.comparisonScoped && summary?.comparison_run_id) {
         params.set("comparison_run_id", summary.comparison_run_id);
+      }
+      if (selectedReport.requiresEntries) {
+        const entries = reportEntries.trim();
+        if (!entries) {
+          throw new Error("Enter one or more IP addresses, host IPs, or CIDR ranges for this export.");
+        }
+        params.set("entries", entries);
+        params.set("expand_cidr", reportExpandCidr ? "true" : "false");
+      }
+      if (selectedReport.supportsDaysUntilExpiry) {
+        params.set("days_until_expiry", String(Math.max(0, Number(reportDaysUntilExpiry || 30))));
       }
       const response = await fetch(`/api/v1/reports/export?${params.toString()}`, {
         credentials: "include"
@@ -2148,7 +2396,121 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
 
                   <Grid size={{ xs: 12, xl: 4.8 }}>
                     <Paper sx={{ p: 2.25 }}>
-                      {selectedFinding ? (
+                      <Stack spacing={2}>
+                        <Box>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                            <Typography variant="h6">Asset Review Queue</Typography>
+                            {assetReviewsLoading ? <CircularProgress size={18} /> : <Chip label={`${assetReviews.length} pending`} size="small" variant="outlined" />}
+                          </Stack>
+                          <Typography variant="body2" color="text.secondary">
+                            Analyst merge and split actions for ambiguous asset matches.
+                          </Typography>
+                        </Box>
+                        {assetReviews.length === 0 ? (
+                          <Alert severity="info">No pending ambiguous asset reviews.</Alert>
+                        ) : (
+                          <>
+                            <Stack spacing={1} sx={{ maxHeight: 220, overflowY: "auto", pr: 0.5 }}>
+                              {assetReviews.map((review) => (
+                                <Box
+                                  key={review.id}
+                                  onClick={() => setSelectedAssetReviewId(review.id)}
+                                  sx={{
+                                    border: 1,
+                                    borderColor: selectedAssetReviewId === review.id ? "primary.main" : "divider",
+                                    borderRadius: 1.5,
+                                    p: 1.25,
+                                    cursor: "pointer"
+                                  }}
+                                >
+                                  <Stack direction="row" justifyContent="space-between" spacing={1}>
+                                    <Typography variant="body2">{review.left_asset.stable_asset_key}</Typography>
+                                    <Chip label={review.status} size="small" variant="outlined" />
+                                  </Stack>
+                                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                                    {review.right_asset.stable_asset_key}
+                                  </Typography>
+                                  <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
+                                    {review.match_basis.map((basis) => (
+                                      <Chip key={`${review.id}-${basis}`} label={basis} size="small" />
+                                    ))}
+                                  </Stack>
+                                </Box>
+                              ))}
+                            </Stack>
+                            {selectedAssetReview ? (
+                              <>
+                                <Grid container spacing={1.25}>
+                                  <Grid size={{ xs: 12, sm: 6 }}>
+                                    <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1.5, p: 1.25, height: "100%" }}>
+                                      <Typography variant="subtitle2">Left candidate</Typography>
+                                      <Typography variant="body2" sx={{ mt: 0.75 }}>{selectedAssetReview.left_asset.stable_asset_key}</Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        {selectedAssetReview.left_asset.hostname || selectedAssetReview.left_asset.fqdn || selectedAssetReview.left_asset.ipv4_address || "No hostname or IP"}
+                                      </Typography>
+                                    </Box>
+                                  </Grid>
+                                  <Grid size={{ xs: 12, sm: 6 }}>
+                                    <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1.5, p: 1.25, height: "100%" }}>
+                                      <Typography variant="subtitle2">Right candidate</Typography>
+                                      <Typography variant="body2" sx={{ mt: 0.75 }}>{selectedAssetReview.right_asset.stable_asset_key}</Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        {selectedAssetReview.right_asset.hostname || selectedAssetReview.right_asset.fqdn || selectedAssetReview.right_asset.ipv4_address || "No hostname or IP"}
+                                      </Typography>
+                                    </Box>
+                                  </Grid>
+                                </Grid>
+                                <TextField
+                                  fullWidth
+                                  label="Canonical asset key"
+                                  value={assetReviewDraft.canonical_asset_key}
+                                  onChange={(event) => setAssetReviewDraft((current) => ({ ...current, canonical_asset_key: event.target.value }))}
+                                />
+                                <TextField
+                                  fullWidth
+                                  multiline
+                                  minRows={2}
+                                  label="Review notes"
+                                  value={assetReviewDraft.notes}
+                                  onChange={(event) => setAssetReviewDraft((current) => ({ ...current, notes: event.target.value }))}
+                                />
+                                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                                  <Button
+                                    variant="outlined"
+                                    onClick={() => void handleAssetReviewMerge(selectedAssetReview.left_asset.stable_asset_key)}
+                                    disabled={!hasPermission("findings.override") || assetReviewBusy !== "" || selectedAssetReview.status !== "pending"}
+                                  >
+                                    Merge to left
+                                  </Button>
+                                  <Button
+                                    variant="outlined"
+                                    onClick={() => void handleAssetReviewMerge(selectedAssetReview.right_asset.stable_asset_key)}
+                                    disabled={!hasPermission("findings.override") || assetReviewBusy !== "" || selectedAssetReview.status !== "pending"}
+                                  >
+                                    Merge to right
+                                  </Button>
+                                  <Button
+                                    variant="contained"
+                                    onClick={() => void handleAssetReviewMerge(assetReviewDraft.canonical_asset_key.trim())}
+                                    disabled={!hasPermission("findings.override") || assetReviewBusy !== "" || !assetReviewDraft.canonical_asset_key.trim() || selectedAssetReview.status !== "pending"}
+                                  >
+                                    Manual merge
+                                  </Button>
+                                  <Button
+                                    color="warning"
+                                    variant="outlined"
+                                    onClick={() => void handleAssetReviewSplit()}
+                                    disabled={!hasPermission("findings.override") || assetReviewBusy !== "" || selectedAssetReview.status !== "pending"}
+                                  >
+                                    Keep split
+                                  </Button>
+                                </Stack>
+                              </>
+                            ) : null}
+                          </>
+                        )}
+                        <Divider />
+                        {selectedFinding ? (
                         <Stack spacing={2}>
                           <Box>
                             <Typography variant="h6">Workflow</Typography>
@@ -2309,6 +2671,7 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                       ) : (
                         <Alert severity="info">Select a finding to load workflow details.</Alert>
                       )}
+                      </Stack>
                     </Paper>
                   </Grid>
                 </Grid>
@@ -2594,7 +2957,11 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                   >
                                     <TableCell>
                                       <Stack spacing={0.3}>
-                                        <Typography variant="body2">{row.name}</Typography>
+                                        <Stack direction="row" spacing={0.75} alignItems="center" useFlexGap flexWrap="wrap">
+                                          <Typography variant="body2">{row.name}</Typography>
+                                          {row.deleted_at ? <Chip label="Trash" size="small" color="warning" variant="outlined" /> : null}
+                                          {row.is_permanently_deleted ? <Chip label="Permanent" size="small" color="error" variant="outlined" /> : null}
+                                        </Stack>
                                         <Typography variant="caption" color="text.secondary">
                                           {row.nessus_scan_id} | {row.nessus_uuid}
                                         </Typography>
@@ -2682,12 +3049,25 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     <Typography variant="caption" color="text.secondary">Last completion</Typography>
                                     <Typography variant="body2">{formatTimestamp(selectedScan.last_completion_at)}</Typography>
                                   </Grid>
+                                  <Grid size={{ xs: 6 }}>
+                                    <Typography variant="caption" color="text.secondary">Trash state</Typography>
+                                    <Typography variant="body2">
+                                      {selectedScan.deleted_at ? `In Trash since ${formatTimestamp(selectedScan.deleted_at)}` : "Active"}
+                                    </Typography>
+                                  </Grid>
+                                  <Grid size={{ xs: 6 }}>
+                                    <Typography variant="caption" color="text.secondary">Permanent delete</Typography>
+                                    <Typography variant="body2">
+                                      {selectedScan.permanently_deleted_at ? formatTimestamp(selectedScan.permanently_deleted_at) : "Not deleted"}
+                                    </Typography>
+                                  </Grid>
                                 </Grid>
                                 <TextField
                                   fullWidth
                                   label="Scan name"
                                   value={scanUpdateDraft.name}
                                   onChange={(event) => setScanUpdateDraft((current) => ({ ...current, name: event.target.value }))}
+                                  disabled={Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)}
                                 />
                                 <FormControl fullWidth>
                                   <InputLabel id="edit-folder-label">Folder</InputLabel>
@@ -2696,6 +3076,7 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     label="Folder"
                                     value={scanUpdateDraft.folder_record_id}
                                     onChange={(event) => setScanUpdateDraft((current) => ({ ...current, folder_record_id: event.target.value }))}
+                                    disabled={Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)}
                                   >
                                     {folders.map((folder) => (
                                       <MenuItem key={folder.id} value={folder.id}>
@@ -2711,6 +3092,7 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     label="Scanner"
                                     value={scanUpdateDraft.scanner_id}
                                     onChange={(event) => setScanUpdateDraft((current) => ({ ...current, scanner_id: event.target.value }))}
+                                    disabled={Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)}
                                   >
                                     <MenuItem value="">Default</MenuItem>
                                     {scanners.map((item) => (
@@ -2727,6 +3109,7 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     label="Schedule"
                                     value={scanUpdateDraft.schedule_type}
                                     onChange={(event) => setScanUpdateDraft((current) => ({ ...current, schedule_type: event.target.value }))}
+                                    disabled={Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)}
                                   >
                                     {scanScheduleOptions.map((item) => (
                                       <MenuItem key={item.value} value={item.value}>
@@ -2742,13 +3125,21 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                   label="Targets"
                                   value={scanUpdateDraft.targets}
                                   onChange={(event) => setScanUpdateDraft((current) => ({ ...current, targets: event.target.value }))}
+                                  disabled={Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)}
                                 />
                                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                                   <Button
                                     variant="contained"
                                     startIcon={<SaveOutlinedIcon />}
                                     onClick={() => void handleScanUpdate()}
-                                    disabled={scanApiUnavailable || !hasPermission("scans.edit") || scanUpdateBusy || !scanUpdateDraft.name.trim() || !scanUpdateDraft.targets.trim()}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.edit") ||
+                                      scanUpdateBusy ||
+                                      !scanUpdateDraft.name.trim() ||
+                                      !scanUpdateDraft.targets.trim() ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)
+                                    }
                                   >
                                     {scanUpdateBusy ? "Saving..." : "Save"}
                                   </Button>
@@ -2756,7 +3147,13 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     variant="outlined"
                                     startIcon={<DriveFileMoveOutlinedIcon />}
                                     onClick={() => void handleScanMove()}
-                                    disabled={scanApiUnavailable || !hasPermission("scans.move") || scanActionBusy === "move" || !scanUpdateDraft.folder_record_id}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.move") ||
+                                      scanActionBusy === "move" ||
+                                      !scanUpdateDraft.folder_record_id ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)
+                                    }
                                   >
                                     {scanActionBusy === "move" ? "Moving..." : "Move"}
                                   </Button>
@@ -2764,15 +3161,53 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     variant="outlined"
                                     startIcon={<PlayArrowOutlinedIcon />}
                                     onClick={() => void handleScanLaunch()}
-                                    disabled={scanApiUnavailable || !hasPermission("scans.launch") || scanActionBusy === "launch"}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.launch") ||
+                                      scanActionBusy === "launch" ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)
+                                    }
                                   >
                                     {scanActionBusy === "launch" ? "Launching..." : "Launch"}
                                   </Button>
                                   <Button
                                     variant="outlined"
                                     startIcon={<StopOutlinedIcon />}
+                                    onClick={() => void handleScanPause()}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.pause") ||
+                                      scanActionBusy === "pause" ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted) ||
+                                      selectedScan.status !== "running"
+                                    }
+                                  >
+                                    {scanActionBusy === "pause" ? "Pausing..." : "Pause"}
+                                  </Button>
+                                  <Button
+                                    variant="outlined"
+                                    startIcon={<PlayArrowOutlinedIcon />}
+                                    onClick={() => void handleScanResume()}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.resume") ||
+                                      scanActionBusy === "resume" ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted) ||
+                                      selectedScan.status !== "paused"
+                                    }
+                                  >
+                                    {scanActionBusy === "resume" ? "Resuming..." : "Resume"}
+                                  </Button>
+                                  <Button
+                                    variant="outlined"
+                                    startIcon={<StopOutlinedIcon />}
                                     onClick={() => void handleScanStop()}
-                                    disabled={scanApiUnavailable || !hasPermission("scans.stop") || scanActionBusy === "stop"}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.stop") ||
+                                      scanActionBusy === "stop" ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)
+                                    }
                                   >
                                     {scanActionBusy === "stop" ? "Stopping..." : "Stop"}
                                   </Button>
@@ -2781,15 +3216,50 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                                     variant="outlined"
                                     startIcon={<DeleteOutlineOutlinedIcon />}
                                     onClick={() => void handleScanTrash()}
-                                    disabled={scanApiUnavailable || !hasPermission("scans.delete") || scanActionBusy === "trash"}
+                                    disabled={
+                                      scanApiUnavailable ||
+                                      !hasPermission("scans.delete") ||
+                                      scanActionBusy === "trash" ||
+                                      Boolean(selectedScan.deleted_at || selectedScan.is_permanently_deleted)
+                                    }
                                   >
                                     {scanActionBusy === "trash" ? "Removing..." : "Trash"}
+                                  </Button>
+                                  <Button
+                                    color="warning"
+                                    variant="outlined"
+                                    startIcon={<RefreshOutlinedIcon />}
+                                    onClick={() => void handleScanRestore()}
+                                    disabled={!hasPermission("scans.restore") || scanActionBusy === "restore" || !selectedScan.is_restorable}
+                                  >
+                                    {scanActionBusy === "restore" ? "Restoring..." : "Restore"}
+                                  </Button>
+                                  <Button
+                                    color="error"
+                                    variant="contained"
+                                    startIcon={<DeleteOutlineOutlinedIcon />}
+                                    onClick={() => void handleScanPermanentDelete()}
+                                    disabled={
+                                      !hasPermission("scans.permanent_delete") ||
+                                      scanActionBusy === "permanent-delete" ||
+                                      !selectedScan.deleted_at ||
+                                      selectedScan.is_restorable ||
+                                      selectedScan.is_permanently_deleted
+                                    }
+                                  >
+                                    {scanActionBusy === "permanent-delete" ? "Deleting..." : "Permanent Delete"}
                                   </Button>
                                 </Stack>
                                 <Alert severity={scanApiUnavailable ? "warning" : "info"}>
                                   {scanApiUnavailable
-                                    ? "The connected Nessus license disables scan-control APIs on this scanner."
-                                    : "Pause, resume, restore and permanent delete will appear when the backend routes are available."}
+                                    ? "The connected Nessus license disables live scan-control API actions such as launch, pause, resume, stop, move, edit, and trash."
+                                    : selectedScan.is_permanently_deleted
+                                      ? "This scan is permanently deleted in the local inventory and cannot be restored."
+                                      : selectedScan.deleted_at
+                                        ? selectedScan.is_restorable
+                                          ? "This scan is in Trash and can be restored because it still exists in Nessus."
+                                          : "This scan is in Trash. Permanent delete becomes available once the remote scan no longer exists in Nessus."
+                                        : "Active scans support launch, pause, resume, stop, trash, and the normal edit workflow."}
                                 </Alert>
                               </>
                             ) : (
@@ -3079,6 +3549,34 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                             <MenuItem value="xlsx">Excel</MenuItem>
                           </Select>
                         </FormControl>
+                        {selectedReport.requiresEntries ? (
+                          <>
+                            <TextField
+                              fullWidth
+                              multiline
+                              minRows={4}
+                              label="Entries"
+                              value={reportEntries}
+                              onChange={(event) => setReportEntries(event.target.value)}
+                              placeholder="10.10.10.5&#10;10.10.10.0/24&#10;192.168.1.15"
+                            />
+                            <FormControlLabel
+                              control={<Switch checked={reportExpandCidr} onChange={(event) => setReportExpandCidr(event.target.checked)} />}
+                              label="Expand CIDR ranges before export"
+                            />
+                          </>
+                        ) : null}
+                        {selectedReport.supportsDaysUntilExpiry ? (
+                          <TextField
+                            fullWidth
+                            type="number"
+                            label="Days until expiry"
+                            value={reportDaysUntilExpiry}
+                            onChange={(event) => setReportDaysUntilExpiry(event.target.value)}
+                            inputProps={{ min: 0, max: 365 }}
+                          />
+                        ) : null}
+                        <Alert severity="info">{selectedReport.description}</Alert>
                         <Button startIcon={<DownloadOutlinedIcon />} variant="contained" onClick={() => void handleExport()} disabled={!hasPermission("reports.export") || exportBusy}>
                           Export
                         </Button>
@@ -3099,7 +3597,7 @@ export default function App({ mode = "dark", onToggleColorMode = () => undefined
                             >
                               <Typography variant="subtitle2">{item.label}</Typography>
                               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                                {item.value}
+                                {item.description}
                               </Typography>
                             </Paper>
                           </Grid>

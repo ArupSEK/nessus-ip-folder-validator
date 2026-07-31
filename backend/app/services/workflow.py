@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.models.asset import AssetRecord
+from backend.app.models.asset_review import AssetKeyOverride, AssetReviewRecord
 from backend.app.models.auth import UserSession
 from backend.app.models.comparison import ComparisonResultRecord
 from backend.app.models.finding import FindingRecord
 from backend.app.models.workflow import FindingWorkflow, SlaPolicy, WorkflowDecision
 from backend.app.schemas.workflow import (
-    WorkflowDecisionListResponse,
+    AssetMergeRequest,
+    AssetReviewAssetSummary,
+    AssetReviewListResponse,
+    AssetReviewResponse,
+    AssetSplitRequest,
     FindingWorkflowResponse,
     FindingWorkflowUpdateRequest,
     WorkflowDecisionApproveRequest,
+    WorkflowDecisionListResponse,
     WorkflowDecisionRequest,
     WorkflowDecisionResponse,
     WorkflowMaintenanceResponse,
@@ -45,6 +52,14 @@ OPEN_WORKFLOW_STATUSES = {
     "Risk accepted",
     "Exception Approved",
     "False positive",
+}
+
+AMBIGUOUS_MATCH_FIELDS = {
+    "hostname": "hostname",
+    "fqdn": "fqdn",
+    "ipv4_address": "ipv4",
+    "ipv6_address": "ipv6",
+    "mac_address": "mac_address",
 }
 
 
@@ -156,6 +171,195 @@ def _to_decision_response(row: WorkflowDecision) -> WorkflowDecisionResponse:
         renewal_history=row.renewal_history,
         approved_at=ensure_utc(row.approved_at).isoformat() if ensure_utc(row.approved_at) else None,
     )
+
+
+def resolve_asset_key(db: Session, asset_key: str) -> str:
+    current = asset_key.strip().lower()
+    for _ in range(10):
+        override = db.scalar(select(AssetKeyOverride).where(AssetKeyOverride.source_asset_key == current, AssetKeyOverride.is_active.is_(True)))
+        if override is None or not override.resolved_asset_key:
+            return current
+        next_key = override.resolved_asset_key.strip().lower()
+        if next_key == current:
+            return current
+        current = next_key
+    return current
+
+
+def _asset_summary(asset_key: str, asset: AssetRecord | None) -> AssetReviewAssetSummary:
+    if asset is None:
+        return AssetReviewAssetSummary(stable_asset_key=asset_key)
+    return AssetReviewAssetSummary(
+        stable_asset_key=asset_key,
+        hostname=asset.hostname,
+        fqdn=asset.fqdn,
+        ipv4_address=asset.ipv4_address,
+        ipv6_address=asset.ipv6_address,
+        tenable_asset_uuid=asset.tenable_asset_uuid,
+        agent_uuid=asset.agent_uuid,
+    )
+
+
+def _to_asset_review_response(db: Session, row: AssetReviewRecord) -> AssetReviewResponse:
+    left_asset = db.scalar(select(AssetRecord).where(AssetRecord.stable_asset_key == row.left_asset_key).order_by(AssetRecord.updated_at.desc()))
+    right_asset = db.scalar(select(AssetRecord).where(AssetRecord.stable_asset_key == row.right_asset_key).order_by(AssetRecord.updated_at.desc()))
+    return AssetReviewResponse(
+        id=row.id,
+        left_asset=_asset_summary(row.left_asset_key, left_asset),
+        right_asset=_asset_summary(row.right_asset_key, right_asset),
+        match_basis=[item for item in row.match_basis.split(",") if item],
+        status=row.status,
+        canonical_asset_key=row.canonical_asset_key,
+        notes=row.notes,
+        resolved_at=ensure_utc(row.resolved_at).isoformat() if ensure_utc(row.resolved_at) else None,
+    )
+
+
+def _normalize_review_pair(left_asset_key: str, right_asset_key: str) -> tuple[str, str]:
+    left = left_asset_key.strip().lower()
+    right = right_asset_key.strip().lower()
+    if left == right:
+        raise WorkflowServiceError("An asset cannot be reviewed against itself.")
+    return (left, right) if left < right else (right, left)
+
+
+def _match_basis(left: AssetRecord, right: AssetRecord) -> list[str]:
+    matches: list[str] = []
+    for field_name, label in AMBIGUOUS_MATCH_FIELDS.items():
+        left_value = getattr(left, field_name, "").strip().lower()
+        right_value = getattr(right, field_name, "").strip().lower()
+        if left_value and right_value and left_value == right_value:
+            matches.append(label)
+    return matches
+
+
+def queue_ambiguous_asset_reviews(db: Session, assets: list[AssetRecord]) -> None:
+    if not assets:
+        return
+    existing_reviews = {
+        (row.left_asset_key, row.right_asset_key): row
+        for row in db.scalars(select(AssetReviewRecord)).all()
+    }
+    historical_assets = db.scalars(select(AssetRecord).order_by(AssetRecord.created_at.asc())).all()
+    candidates = historical_assets
+    for index, current in enumerate(assets):
+        current_key = resolve_asset_key(db, current.stable_asset_key)
+        for other in candidates:
+            if other.id == current.id:
+                continue
+            other_key = resolve_asset_key(db, other.stable_asset_key)
+            if current_key == other_key:
+                continue
+            basis = _match_basis(current, other)
+            if not basis:
+                continue
+            left_key, right_key = _normalize_review_pair(current_key, other_key)
+            if (left_key, right_key) in existing_reviews:
+                continue
+            review = AssetReviewRecord(
+                left_asset_key=left_key,
+                right_asset_key=right_key,
+                left_hostname=current.hostname if left_key == current_key else other.hostname,
+                right_hostname=other.hostname if right_key == other_key else current.hostname,
+                left_ipv4_address=current.ipv4_address if left_key == current_key else other.ipv4_address,
+                right_ipv4_address=other.ipv4_address if right_key == other_key else current.ipv4_address,
+                left_fqdn=current.fqdn if left_key == current_key else other.fqdn,
+                right_fqdn=other.fqdn if right_key == other_key else current.fqdn,
+                match_basis=",".join(sorted(set(basis))),
+                status="pending",
+            )
+            db.add(review)
+            db.flush()
+            existing_reviews[(left_key, right_key)] = review
+
+
+def list_asset_reviews(db: Session, *, status: str = "pending") -> AssetReviewListResponse:
+    query = select(AssetReviewRecord).order_by(AssetReviewRecord.created_at.desc())
+    normalized_status = status.strip().lower()
+    if normalized_status:
+        query = query.where(AssetReviewRecord.status == normalized_status)
+    rows = db.scalars(query).all()
+    reviews = [_to_asset_review_response(db, row) for row in rows]
+    return AssetReviewListResponse(total=len(reviews), reviews=reviews)
+
+
+def merge_asset_review(
+    db: Session,
+    *,
+    actor_session: UserSession,
+    review_id: str,
+    payload: AssetMergeRequest,
+    source_ip: str,
+) -> AssetReviewResponse:
+    review = db.get(AssetReviewRecord, review_id)
+    if review is None:
+        raise WorkflowServiceError("Asset review was not found.")
+    if review.status != "pending":
+        raise WorkflowServiceError("Only pending asset reviews can be merged.")
+    canonical = resolve_asset_key(db, payload.canonical_asset_key)
+    allowed_keys = {review.left_asset_key, review.right_asset_key}
+    if canonical not in allowed_keys:
+        raise WorkflowServiceError("Canonical asset key must match one of the review candidates.")
+    source_key = next(item for item in allowed_keys if item != canonical)
+    override = db.scalar(select(AssetKeyOverride).where(AssetKeyOverride.source_asset_key == source_key))
+    if override is None:
+        override = AssetKeyOverride(source_asset_key=source_key)
+        db.add(override)
+    override.resolved_asset_key = canonical
+    override.resolution_type = "merge"
+    override.is_active = True
+    override.created_by_user_id = actor_session.user_id
+
+    review.status = "merged"
+    review.canonical_asset_key = canonical
+    review.notes = payload.notes.strip()
+    review.resolved_by_user_id = actor_session.user_id
+    review.resolved_at = utc_now()
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="assets.review.merge",
+        object_type="asset_review",
+        object_id=review.id,
+        object_name=f"{review.left_asset_key}|{review.right_asset_key}",
+        source_ip=source_ip,
+        new_state={"canonical_asset_key": canonical, "notes": review.notes},
+    )
+    db.commit()
+    db.refresh(review)
+    return _to_asset_review_response(db, review)
+
+
+def split_asset_review(
+    db: Session,
+    *,
+    actor_session: UserSession,
+    review_id: str,
+    payload: AssetSplitRequest,
+    source_ip: str,
+) -> AssetReviewResponse:
+    review = db.get(AssetReviewRecord, review_id)
+    if review is None:
+        raise WorkflowServiceError("Asset review was not found.")
+    if review.status != "pending":
+        raise WorkflowServiceError("Only pending asset reviews can be split.")
+    review.status = "split"
+    review.notes = payload.notes.strip()
+    review.resolved_by_user_id = actor_session.user_id
+    review.resolved_at = utc_now()
+    write_audit(
+        db,
+        actor_user_id=actor_session.user_id,
+        action="assets.review.split",
+        object_type="asset_review",
+        object_id=review.id,
+        object_name=f"{review.left_asset_key}|{review.right_asset_key}",
+        source_ip=source_ip,
+        new_state={"notes": review.notes},
+    )
+    db.commit()
+    db.refresh(review)
+    return _to_asset_review_response(db, review)
 
 
 def _get_or_create_workflow(db: Session, *, finding_key: str, actor_session: UserSession) -> tuple[FindingWorkflow, FindingRecord]:
@@ -362,9 +566,8 @@ def expire_workflow_decisions(
         write_audit(
             db,
             actor_user_id=actor_session.user_id,
-            action="workflow.maintenance.expire",
+            action="workflow.decisions.expire",
             object_type="workflow_decision",
-            object_id="batch",
             object_name="expired_decisions",
             source_ip=source_ip,
             new_state={"expired_count": count},

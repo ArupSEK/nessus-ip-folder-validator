@@ -15,6 +15,7 @@ from backend.app.schemas.scan import (
     ScanHistoryListResponse,
     ScanListResponse,
     ScanMoveRequest,
+    ScanPermanentDeleteRequest,
     ScanResponse,
     ScanUpdateRequest,
     ScannerListResponse,
@@ -33,7 +34,11 @@ from backend.app.services.scans import (
     list_scanners,
     list_scans,
     move_scan,
+    pause_scan,
+    permanent_delete_scan,
     refresh_scans,
+    restore_scan,
+    resume_scan,
     stop_scan,
     trash_scan,
     update_scan,
@@ -255,6 +260,50 @@ def stop_scan_route(
         raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
+@router.post("/{scan_id}/pause", response_model=ScanResponse)
+def pause_scan_route(
+    scan_id: str,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("scans.pause")),
+    db: Session = Depends(get_db),
+    client_factory: NessusClientFactory = Depends(get_nessus_client_factory),
+) -> ScanResponse:
+    try:
+        return pause_scan(
+            db,
+            actor_session=current_session,
+            scan_record_id=scan_id,
+            source_ip=get_source_ip(request),
+            client_factory=client_factory,
+        )
+    except Exception as exc:
+        status_code, detail = _translate_scan_error(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/{scan_id}/resume", response_model=ScanResponse)
+def resume_scan_route(
+    scan_id: str,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("scans.resume")),
+    db: Session = Depends(get_db),
+    client_factory: NessusClientFactory = Depends(get_nessus_client_factory),
+) -> ScanResponse:
+    try:
+        return resume_scan(
+            db,
+            actor_session=current_session,
+            scan_record_id=scan_id,
+            source_ip=get_source_ip(request),
+            client_factory=client_factory,
+        )
+    except Exception as exc:
+        status_code, detail = _translate_scan_error(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @router.post("/{scan_id}/trash", response_model=GenericMessage)
 def trash_scan_route(
     scan_id: str,
@@ -276,6 +325,53 @@ def trash_scan_route(
         status_code, detail = _translate_scan_error(exc)
         raise HTTPException(status_code=status_code, detail=detail) from exc
     return GenericMessage(message="Scan moved to Trash.")
+
+
+@router.post("/{scan_id}/restore", response_model=ScanResponse)
+def restore_scan_route(
+    scan_id: str,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("scans.restore")),
+    db: Session = Depends(get_db),
+    client_factory: NessusClientFactory = Depends(get_nessus_client_factory),
+) -> ScanResponse:
+    try:
+        return restore_scan(
+            db,
+            actor_session=current_session,
+            scan_record_id=scan_id,
+            source_ip=get_source_ip(request),
+            client_factory=client_factory,
+        )
+    except Exception as exc:
+        status_code, detail = _translate_scan_error(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/{scan_id}/permanent-delete", response_model=GenericMessage)
+def permanent_delete_scan_route(
+    scan_id: str,
+    payload: ScanPermanentDeleteRequest,
+    request: Request,
+    current_session=Depends(require_csrf),
+    _: object = Depends(require_permissions("scans.permanent_delete")),
+    db: Session = Depends(get_db),
+    client_factory: NessusClientFactory = Depends(get_nessus_client_factory),
+) -> GenericMessage:
+    try:
+        permanent_delete_scan(
+            db,
+            actor_session=current_session,
+            scan_record_id=scan_id,
+            payload=payload,
+            source_ip=get_source_ip(request),
+            client_factory=client_factory,
+        )
+    except Exception as exc:
+        status_code, detail = _translate_scan_error(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return GenericMessage(message="Scan permanently deleted.")
 
 
 @router.get("/{scan_id}/history", response_model=ScanHistoryListResponse)

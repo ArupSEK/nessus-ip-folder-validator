@@ -80,6 +80,34 @@ async def test_valid_text_upload(app, client, admin_user) -> None:
 
 
 @pytest.mark.anyio
+async def test_invalid_excel_signature_is_rejected(app, client, admin_user) -> None:
+    state = ScanMockState()
+    app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)
+    csrf_token = await login_admin(client)
+    await save_profile_and_refresh_folders(client, csrf_token)
+    await sync_scans(client, csrf_token)
+    files = {"file": ("targets.xlsx", b"not-a-zip", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    response = await client.post("/api/v1/ip-search/upload", files=files)
+    assert response.status_code == 400
+    assert "valid Excel workbook" in response.json()["detail"]
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_oversized_upload_is_rejected(app, client, admin_user) -> None:
+    state = ScanMockState()
+    app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)
+    csrf_token = await login_admin(client)
+    await save_profile_and_refresh_folders(client, csrf_token)
+    await sync_scans(client, csrf_token)
+    files = {"file": ("targets.txt", b"1" * (2 * 1024 * 1024 + 1), "text/plain")}
+    response = await client.post("/api/v1/ip-search/upload", files=files)
+    assert response.status_code == 400
+    assert "size limit" in response.json()["detail"]
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
 async def test_invalid_ip_handling(app, client, admin_user) -> None:
     state = ScanMockState()
     app.dependency_overrides[get_nessus_client_factory] = lambda: NessusClientFactory(transport=build_scan_transport(state), retries=0)

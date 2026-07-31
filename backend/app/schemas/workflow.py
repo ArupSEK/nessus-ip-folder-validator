@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FindingWorkflowUpdateRequest(BaseModel):
@@ -78,3 +78,38 @@ class WorkflowDecisionListResponse(BaseModel):
 
 class WorkflowMaintenanceResponse(BaseModel):
     expired_count: int
+
+
+class AssetReviewAssetSummary(BaseModel):
+    stable_asset_key: str
+    hostname: str = ""
+    fqdn: str = ""
+    ipv4_address: str = ""
+    ipv6_address: str = ""
+    tenable_asset_uuid: str = ""
+    agent_uuid: str = ""
+
+
+class AssetReviewResponse(BaseModel):
+    id: str
+    left_asset: AssetReviewAssetSummary
+    right_asset: AssetReviewAssetSummary
+    match_basis: list[str] = Field(default_factory=list)
+    status: str
+    canonical_asset_key: str = ""
+    notes: str = ""
+    resolved_at: str | None = None
+
+
+class AssetReviewListResponse(BaseModel):
+    total: int
+    reviews: list[AssetReviewResponse]
+
+
+class AssetMergeRequest(BaseModel):
+    canonical_asset_key: str
+    notes: str = ""
+
+
+class AssetSplitRequest(BaseModel):
+    notes: str = ""

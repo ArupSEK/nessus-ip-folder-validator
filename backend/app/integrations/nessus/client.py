@@ -337,6 +337,9 @@ class NessusApiClient:
     def get_scan_details(self, scan_id: str) -> dict[str, Any]:
         return self._request("GET", f"/scans/{scan_id}")
 
+    def scan_exists(self, scan_id: str) -> bool:
+        return bool(self._request("GET", f"/scans/{scan_id}", allow_missing=True))
+
     def get_scan_history(self, scan_id: str) -> list[ScanHistorySummary]:
         payload = self._request("GET", f"/scans/{scan_id}")
         history = payload.get("history") or payload.get("histories") or []
@@ -353,6 +356,12 @@ class NessusApiClient:
 
     def launch_scan(self, scan_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._request("POST", f"/scans/{scan_id}/launch", json_body=payload or {})
+
+    def pause_scan(self, scan_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/scans/{scan_id}/pause")
+
+    def resume_scan(self, scan_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/scans/{scan_id}/resume")
 
     def stop_scan(self, scan_id: str) -> dict[str, Any]:
         return self._request("POST", f"/scans/{scan_id}/stop")
@@ -401,6 +410,8 @@ class NessusApiClient:
                 raise NessusResponseError(f"Nessus export download failed with status {response.status_code}.")
             return response.content
 
+        raise NessusResponseError("Nessus export download retry budget exhausted.")
+
     def validate_connection(self, *, approved_hosts: list[str]) -> ConnectionValidationResult:
         raw_server_info = self._request("GET", "/server/properties")
         server_info = ServerInfo.from_payload(raw_server_info)
@@ -429,8 +440,12 @@ class NessusApiClient:
             "scans.create": scan_api_enabled,
             "scans.clone": scan_api_enabled,
             "scans.launch": scan_api_enabled,
+            "scans.pause": scan_api_enabled,
+            "scans.resume": scan_api_enabled,
             "scans.stop": scan_api_enabled,
             "scans.delete": scan_api_enabled,
+            "scans.restore": False,
+            "scans.permanent_delete": False,
         }
 
         try:
@@ -462,6 +477,8 @@ class NessusApiClient:
             capabilities["scanners.list"] = True
         except NessusClientError as exc:
             logger.info("Scanner capability probe failed: %s", exc)
+
+        capabilities["scans.export"] = capabilities["scans.list"]
 
         return ConnectionValidationResult(
             base_url=self.base_url,

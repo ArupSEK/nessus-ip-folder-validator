@@ -89,13 +89,21 @@ Phase 11: Security Hardening
 - Scan creation UI expanded with source selection for template, policy and master-template flows
 - Nessus policy inventory API added and backend scan creation now supports policy-based creation and master-template cloning paths
 - Scan-control capability detection hardened so scanners reporting `license.features.scan_api=false` disable create, clone, launch, stop, move, Trash and history-delete actions before any live POST is attempted
+- Scan pause, resume, restore and permanent-delete backend routes added with audit coverage and UI wiring
+- Global IP search export and workflow/SLA-oriented reports added, including scan authentication status, SLA overdue, risk acceptance and expiring exceptions
+- Ambiguous asset analyst review queue added with manual merge and split actions plus audit logging
+- Phase 11 hardening expanded with invalid-Excel signature checks, upload size limits, redirect blocking and destructive-action replay coverage
+- Alembic migration `20260730_000009` added for scan permanent-delete state and asset review tables
+- Focused backend validation passed for the new scan, report, workflow, IP search and hardening changes
+- Frontend validation passed for the updated scan, findings and reporting surfaces
+- Docker, PostgreSQL, Redis and Celery runtime tooling availability was checked on July 30, 2026; Python dependencies are installed, but host-level service tooling is still absent on this machine
 
 ## In Progress
 
 - Broader Phase 11 hardening coverage still needs deeper review across XSS, path traversal, unsafe redirects, audit tampering and destructive-action replay.
-- Advanced scan controls still need backend route coverage for pause, resume, restore and permanent delete.
 - Live scan-creation validation remains blocked on the local Nessus instance because the server reports `license.features.scan_api=false`; direct upstream `POST /scans` calls still reset the connection instead of returning a normal API error.
 - Live master-template cloning validation remains blocked on the local Nessus instance for the same reason; direct upstream `POST /scans/{scan_id}/copy` calls still reset the connection instead of returning a normal API error.
+- Docker Compose, PostgreSQL, Redis and Celery runtime bring-up remains blocked locally because `docker`, `psql` and `redis-cli` are not installed on this workstation.
 
 ## Not Started
 
@@ -351,23 +359,49 @@ python -c "import os; from backend.app.integrations.nessus.client import NessusA
 - `cd frontend && npm run test -- --run` -> 3 passed
 - Live capability probe against `https://localhost:8834` with the provided test credentials returned `server_version=19.18.2` and `scans.api=false`
 
+### Phase 11 Scan Controls, Reports And Asset Review Validation
+
+```text
+python -m pytest backend/tests/test_scans.py backend/tests/test_dashboard_reports.py backend/tests/test_workflow.py backend/tests/test_ip_search_api.py backend/tests/test_security_hardening.py backend/tests/test_nessus_integration.py -q
+cd frontend && npm run test -- --run
+cd frontend && npm run build
+docker version
+docker compose config
+psql --version
+redis-cli --version
+python -m celery --version
+python -c "import celery, psycopg, redis"
+```
+
+### Phase 11 Scan Controls, Reports And Asset Review Results
+
+- `python -m pytest backend/tests/test_scans.py backend/tests/test_dashboard_reports.py backend/tests/test_workflow.py backend/tests/test_ip_search_api.py backend/tests/test_security_hardening.py backend/tests/test_nessus_integration.py -q` -> 50 passed
+- `cd frontend && npm run test -- --run` -> 4 passed
+- `cd frontend && npm run build` -> passed
+- `docker version` -> failed because `docker` is not installed on this workstation
+- `docker compose config` -> failed because `docker` is not installed on this workstation
+- `psql --version` -> failed because `psql` is not installed on this workstation
+- `redis-cli --version` -> failed because `redis-cli` is not installed on this workstation
+- `python -m celery --version` -> passed (`5.6.3`)
+- `python -c "import celery, psycopg, redis"` -> passed
+- `python -c "from backend.app.worker import celery_app; print(...)"` -> passed and confirmed the configured broker/result backends use local Redis URLs
+
 ## Remaining Issues
 
-- Docker is not installed in this environment, so Compose runtime startup could not be executed here.
 - The old Streamlit starter still exists and has not yet been retired or integrated into the new stack.
-- PostgreSQL runtime verification is still pending; automated validation currently runs on SQLite for local tests.
-- Redis and Celery runtime verification are still pending.
-- Report coverage is implemented for persisted inventories, scan-comparison views, full audit exports and deleted-object audit exports; global IP search export and workflow-driven reports still need implementation.
-- Workflow state is implemented per deterministic `finding_key`; analyst merge/split handling for ambiguous assets is still pending.
+- Docker Compose runtime startup could not be executed here because `docker` is not installed on this workstation.
+- PostgreSQL runtime verification is still pending because `psql` and Docker-based PostgreSQL are not available on this workstation; automated validation still runs on SQLite for local tests.
+- Redis runtime verification is still pending because `redis-cli` and Docker-based Redis are not available on this workstation.
+- Celery runtime processing is importable and configured, but end-to-end worker execution is still pending because the local Redis service runtime is not available on this workstation.
 - No MFA flow has been implemented yet; the backend structure is only MFA-ready.
 
 ## Phase Gate Decision
 
-Phases 1 through 10 are implemented. Phase 11 has an initial validation pass in place, and the audit browsing/report surface is now wired end to end. Additional hardening coverage is still pending.
+Phases 1 through 10 are implemented. Phase 11 now includes the audit surface, advanced scan controls, workflow/reporting additions and ambiguous-asset review flow, with focused backend and frontend validation complete. Additional hardening coverage and full service-runtime validation are still pending.
 
 ## Next Step
 
-Expand the remaining Phase 11 security test matrix and build the import/comparison operator surfaces now that Nessus settings, folders, scans and IP search are wired.
+Expand the remaining Phase 11 security test matrix and complete environment-level runtime bring-up once Docker/PostgreSQL/Redis tooling is available on the local workstation.
 
 ## Ordered Remaining Work
 
@@ -402,27 +436,23 @@ Expand the remaining Phase 11 security test matrix and build the import/comparis
    - move completed
    - launch completed
    - stop completed
-   - pause and resume when supported pending backend routes
-   - Trash completed; restore and permanent delete pending backend routes
+   - pause and resume completed
+   - Trash, restore and permanent delete completed
    - scan-history browsing and delete flow completed
 5. Finish the Global IP Search surface:
    - frontend page wiring completed
-   - export support pending
+   - export support completed
    - imported-result and host-result surfacing where available pending
 6. Build the import and comparison operator surfaces:
    - import job monitoring
    - recovery actions
    - comparison-run trigger and review
 7. Finish remaining reporting surfaces from the specification:
-   - global IP search export
-   - scan authentication status report
-   - SLA overdue report
-   - risk acceptance report
-   - expiring exceptions report
-   - any frontend wiring still missing for implemented report types
+   - current required exports completed
+   - add any additional operator or executive reports not yet in the agreed scope
 8. Implement unresolved workflow and matching gaps:
-   - analyst review queue for ambiguous assets
-   - manual merge and split flow with audit logging
+   - analyst review queue for ambiguous assets completed
+   - manual merge and split flow with audit logging completed
 9. Implement MFA / second-factor enforcement flows.
 10. Run final environment validation when tooling is available:
     - Docker Compose startup
